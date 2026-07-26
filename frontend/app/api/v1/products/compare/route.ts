@@ -28,11 +28,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
+import { productCompareBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { compareProducts } from '@/lib/services/comparisonService';
-import { getAllProducts, getProductById, MOCK_EVENTS } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
+import type { Product } from '@/lib/types';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -57,45 +60,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(await request.text());
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
+    const body = parseJsonBody(request, await request.text(), productCompareBodySchema);
+    const productIds = body.productIds;
+    const products = productIds.map((id) => getProductById(id)).filter((p) => p !== undefined);
 
-  const body = payload as Record<string, unknown>;
+    if (products.length < 2) {
+      return apiError(
+        request,
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'At least 2 valid products required',
+      );
+    }
 
-  if (!Array.isArray(body.productIds) || body.productIds.length < 2) {
-    return apiError(
+    const result = compareProducts(products, MOCK_EVENTS);
+    const response = {
+      products: result.products,
+      networkTrustSignals: {
+        sharedActors: Object.fromEntries(result.networkTrustSignals.sharedActors),
+        sharedLocations: Object.fromEntries(result.networkTrustSignals.sharedLocations),
+        trustPathStrength: result.networkTrustSignals.trustPathStrength,
+      },
+    };
+    recordRequest('POST /api/v1/products/compare', 200, Date.now() - start);
+    return withCors(
       request,
-      400,
-      ErrorCode.VALIDATION_ERROR,
-      'productIds must be an array with at least 2 items',
+      withCorrelationId(request, NextResponse.json(response, { status: 200 })),
+    );
+  } catch (error) {
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
     );
   }
-
-  const productIds = body.productIds as string[];
-  const products = productIds.map((id) => getProductById(id)).filter((p) => p !== undefined);
-
-  if (products.length < 2) {
-    return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'At least 2 valid products required');
-  }
-
-  const result = compareProducts(products, MOCK_EVENTS);
-
-  const response = {
-    products: result.products,
-    networkTrustSignals: {
-      sharedActors: Object.fromEntries(result.networkTrustSignals.sharedActors),
-      sharedLocations: Object.fromEntries(result.networkTrustSignals.sharedLocations),
-      trustPathStrength: result.networkTrustSignals.trustPathStrength,
-    },
-  };
-
-  recordRequest('POST /api/v1/products/compare', 200, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(response, { status: 200 })),
-  );
 }

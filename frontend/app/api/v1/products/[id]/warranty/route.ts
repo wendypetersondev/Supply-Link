@@ -13,8 +13,10 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { withIdempotency } from '@/lib/api/idempotency';
-import { getProductById, MOCK_PRODUCTS } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
+import { warrantyBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import type { WarrantyInfo } from '@/lib/types';
 
 export function OPTIONS(request: NextRequest) {
@@ -22,13 +24,16 @@ export function OPTIONS(request: NextRequest) {
 }
 
 async function getWarranty(req: NextRequest, productId: string): Promise<NextResponse> {
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     return apiError(req, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${productId}`);
   }
   return withCors(
     req,
-    withCorrelationId(req, NextResponse.json({ warranty: product.warranty ?? null }, { status: 200 })),
+    withCorrelationId(
+      req,
+      NextResponse.json({ warranty: product.warranty ?? null }, { status: 200 }),
+    ),
   );
 }
 
@@ -37,58 +42,35 @@ async function registerWarranty(
   productId: string,
   rawBody: string,
 ): Promise<NextResponse> {
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     return apiError(req, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${productId}`);
   }
 
-  let payload: unknown;
+  let body;
   try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
-
-  const body = payload as Record<string, unknown>;
-
-  const durationSeconds =
-    typeof body.durationSeconds === 'number' ? body.durationSeconds : 0;
-  if (durationSeconds < 0) {
-    return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'durationSeconds must be >= 0');
-  }
-
-  const terms = typeof body.terms === 'string' ? body.terms : '';
-  const termsRef = typeof body.termsRef === 'string' ? body.termsRef : '';
-  const issuer = typeof body.issuer === 'string' ? body.issuer : 'unknown';
-
-  if (terms.length > 1024) {
-    return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'terms exceeds 1024 characters');
-  }
-  if (termsRef.length > 512) {
-    return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'termsRef exceeds 512 characters');
+    body = parseJsonBody(req, rawBody, warrantyBodySchema);
+  } catch (error) {
+    return (
+      handleValidationError(req, error) ??
+      apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON')
+    );
   }
 
   const warranty: WarrantyInfo = {
     productId,
-    durationSeconds,
-    issuer,
+    durationSeconds: body.durationSeconds,
+    issuer: body.issuer,
     issuedAt: Date.now(),
-    terms,
-    termsRef,
+    terms: body.terms,
+    termsRef: body.termsRef,
     voided: false,
     voidedAt: 0,
   };
 
-  // TODO: persist to database / submit to contract
-  const idx = MOCK_PRODUCTS.findIndex((p) => p.id === productId);
-  if (idx !== -1) {
-    MOCK_PRODUCTS[idx] = { ...MOCK_PRODUCTS[idx], warranty };
-  }
+  await getProductRepository().setWarranty(productId, warranty);
 
-  return withCors(
-    req,
-    withCorrelationId(req, NextResponse.json({ warranty }, { status: 201 })),
-  );
+  return withCors(req, withCorrelationId(req, NextResponse.json({ warranty }, { status: 201 })));
 }
 
 export async function GET(
@@ -96,11 +78,21 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   const start = Date.now();
-  const limited = applyRateLimit(request, 'GET /api/v1/products/[id]/warranty', RATE_LIMIT_PRESETS.publicRead);
-  if (limited) { recordRequest('GET /api/v1/products/[id]/warranty', 429, Date.now() - start); return limited; }
+  const limited = applyRateLimit(
+    request,
+    'GET /api/v1/products/[id]/warranty',
+    RATE_LIMIT_PRESETS.publicRead,
+  );
+  if (limited) {
+    recordRequest('GET /api/v1/products/[id]/warranty', 429, Date.now() - start);
+    return limited;
+  }
 
   const auth = await authenticateApiRequest(request, 'partner');
-  if (auth.error) { recordRequest('GET /api/v1/products/[id]/warranty', 401, Date.now() - start); return auth.error; }
+  if (auth.error) {
+    recordRequest('GET /api/v1/products/[id]/warranty', 401, Date.now() - start);
+    return auth.error;
+  }
 
   const { id } = await params;
   if (!id) return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid product ID');
@@ -115,11 +107,21 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   const start = Date.now();
-  const limited = applyRateLimit(request, 'POST /api/v1/products/[id]/warranty', RATE_LIMIT_PRESETS.default);
-  if (limited) { recordRequest('POST /api/v1/products/[id]/warranty', 429, Date.now() - start); return limited; }
+  const limited = applyRateLimit(
+    request,
+    'POST /api/v1/products/[id]/warranty',
+    RATE_LIMIT_PRESETS.default,
+  );
+  if (limited) {
+    recordRequest('POST /api/v1/products/[id]/warranty', 429, Date.now() - start);
+    return limited;
+  }
 
   const auth = await authenticateApiRequest(request, 'partner');
-  if (auth.error) { recordRequest('POST /api/v1/products/[id]/warranty', 401, Date.now() - start); return auth.error; }
+  if (auth.error) {
+    recordRequest('POST /api/v1/products/[id]/warranty', 401, Date.now() - start);
+    return auth.error;
+  }
 
   const { id } = await params;
   if (!id) return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid product ID');

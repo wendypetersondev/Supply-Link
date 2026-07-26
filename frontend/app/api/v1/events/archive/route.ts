@@ -7,7 +7,6 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
@@ -15,6 +14,8 @@ import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
 import { kvStore } from '@/lib/kv';
 import type { ArchivedEvent, TrackingEvent } from '@/lib/types';
+import { eventArchiveBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export const runtime = 'nodejs';
 
@@ -42,12 +43,6 @@ async function saveArchivedEvents(productId: string, events: ArchivedEvent[]): P
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-const archiveSchema = z.object({
-  productId: z.string().trim().min(1).max(128),
-  stableId: z.string().trim().min(1).max(128),
-  reason: z.string().trim().max(512).default(''),
-});
-
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 export function OPTIONS(request: NextRequest) {
@@ -57,7 +52,11 @@ export function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const start = Date.now();
 
-  const limited = applyRateLimit(request, 'POST /api/v1/events/archive', RATE_LIMIT_PRESETS.default);
+  const limited = applyRateLimit(
+    request,
+    'POST /api/v1/events/archive',
+    RATE_LIMIT_PRESETS.default,
+  );
   if (limited) {
     recordRequest('POST /api/v1/events/archive', 429, Date.now() - start);
     return limited;
@@ -69,62 +68,53 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = await request.json();
-  } catch {
-    recordRequest('POST /api/v1/events/archive', 400, Date.now() - start);
-    return withCors(request, apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'));
-  }
-
-  const parsed = archiveSchema.safeParse(payload);
-  if (!parsed.success) {
+    const { productId, stableId, reason } = parseJsonBody(
+      request,
+      await request.text(),
+      eventArchiveBodySchema,
+    );
+    // Retrieve active events from KV (mock layer — in production this calls the contract)
+    const activeKey = `events:active:${productId}`;
+    const activeRaw = await kvStore.get(activeKey);
+    const activeEvents: TrackingEvent[] = activeRaw
+      ? (JSON.parse(activeRaw) as TrackingEvent[])
+      : [];
+    const targetIndex = activeEvents.findIndex((e) => e.stableId === stableId);
+    if (targetIndex === -1)
+      return withCors(
+        request,
+        apiError(
+          request,
+          404,
+          ErrorCode.NOT_FOUND,
+          `Event with stableId '${stableId}' not found in active list`,
+        ),
+      );
+    const [targetEvent] = activeEvents.splice(targetIndex, 1);
+    await kvStore.set(activeKey, JSON.stringify(activeEvents), ARCHIVE_TTL);
+    const archived: ArchivedEvent = {
+      event: { ...targetEvent, archived: true },
+      archivedBy: auth.apiKey ?? 'system',
+      archivedAt: Date.now(),
+      reason,
+    };
+    const existing = await getArchivedEvents(productId);
+    existing.push(archived);
+    await saveArchivedEvents(productId, existing);
+    recordRequest('POST /api/v1/events/archive', 201, Date.now() - start);
+    return withCors(
+      request,
+      withCorrelationId(request, NextResponse.json(archived, { status: 201 })),
+    );
+  } catch (error) {
     recordRequest('POST /api/v1/events/archive', 400, Date.now() - start);
     return withCors(
       request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, parsed.error.issues[0]?.message ?? 'Validation error'),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid request'),
     );
   }
-
-  const { productId, stableId, reason } = parsed.data;
-
-  // Retrieve active events from KV (mock layer — in production this calls the contract)
-  const activeKey = `events:active:${productId}`;
-  const activeRaw = await kvStore.get(activeKey);
-  const activeEvents: TrackingEvent[] = activeRaw ? (JSON.parse(activeRaw) as TrackingEvent[]) : [];
-
-  const targetIndex = activeEvents.findIndex((e) => e.stableId === stableId);
-  if (targetIndex === -1) {
-    recordRequest('POST /api/v1/events/archive', 404, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 404, ErrorCode.NOT_FOUND, `Event with stableId '${stableId}' not found in active list`),
-    );
-  }
-
-  const [targetEvent] = activeEvents.splice(targetIndex, 1);
-
-  // Persist updated active list
-  await kvStore.set(activeKey, JSON.stringify(activeEvents), ARCHIVE_TTL);
-
-  // Build archived record
-  const archived: ArchivedEvent = {
-    event: { ...targetEvent, archived: true },
-    archivedBy: auth.apiKey ?? 'system',
-    archivedAt: Date.now(),
-    reason,
-  };
-
-  // Append to archive list
-  const existing = await getArchivedEvents(productId);
-  existing.push(archived);
-  await saveArchivedEvents(productId, existing);
-
-  recordRequest('POST /api/v1/events/archive', 201, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(archived, { status: 201 })),
-  );
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {

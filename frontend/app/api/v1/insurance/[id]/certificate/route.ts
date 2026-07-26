@@ -4,12 +4,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { insuranceCertificateBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import {
   getCoverage,
   generateInsuranceCertificate,
@@ -19,10 +20,6 @@ import {
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const IssueCertificateSchema = z.object({
-  issuedBy: z.string().min(1).max(100),
-});
 
 export async function GET(
   request: NextRequest,
@@ -83,32 +80,15 @@ export async function POST(
     );
   }
 
-  let body: unknown;
+  let body;
   try {
-    body = await request.json();
-  } catch {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
-    );
+    body = parseJsonBody(request, await request.text(), insuranceCertificateBodySchema);
+  } catch (error) {
+    recordRequest('POST /api/v1/insurance/[id]/certificate', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
   }
 
-  const parsed = IssueCertificateSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('POST /api/v1/insurance/[id]/certificate', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed', {
-        details: parsed.error.issues.map((e) => ({
-          field: e.path.join('.'),
-          location: 'body' as const,
-          message: e.message,
-        })),
-      }),
-    );
-  }
-
-  const certificate = generateInsuranceCertificate(id, parsed.data.issuedBy);
+  const certificate = generateInsuranceCertificate(id, body.issuedBy);
   if (!certificate) {
     recordRequest('POST /api/v1/insurance/[id]/certificate', 422, Date.now() - start);
     return withCors(

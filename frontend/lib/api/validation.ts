@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ZodError, ZodType } from 'zod';
-import {
-  apiError,
-  ApiErrorDetail,
-  ApiErrorEnvelope,
-  ErrorCode,
-} from '@/lib/api/errors';
+import { apiError, ApiErrorDetail, ApiErrorEnvelope, ErrorCode } from '@/lib/api/errors';
 import { getCorrelationId } from '@/lib/api/correlation';
 
 export const ValidationTaxonomy = {
@@ -17,8 +12,7 @@ export const ValidationTaxonomy = {
   MULTIPART_PARSE_FAILED: 'multipart_parse_failed',
 } as const;
 
-export type ValidationTaxonomy =
-  (typeof ValidationTaxonomy)[keyof typeof ValidationTaxonomy];
+export type ValidationTaxonomy = (typeof ValidationTaxonomy)[keyof typeof ValidationTaxonomy];
 
 type ErrorLocation = ApiErrorDetail['location'];
 
@@ -35,10 +29,7 @@ export class RequestValidationError extends Error {
   }
 }
 
-function logValidationFailure(
-  request: NextRequest,
-  error: RequestValidationError,
-): void {
+function logValidationFailure(request: NextRequest, error: RequestValidationError): void {
   console.warn('[api-validation]', {
     route: request.nextUrl.pathname,
     method: request.method,
@@ -57,7 +48,9 @@ function toFieldPath(path: Array<string | number>): string {
 
 function mapZodIssues(error: ZodError, location: ErrorLocation): ApiErrorDetail[] {
   return error.issues.map((issue) => ({
-    field: toFieldPath(issue.path.filter((part): part is string | number => typeof part !== 'symbol')),
+    field: toFieldPath(
+      issue.path.filter((part): part is string | number => typeof part !== 'symbol'),
+    ),
     location,
     message: issue.message,
     code: issue.code,
@@ -113,11 +106,7 @@ export function handleValidationError(
   });
 }
 
-export function parseJsonBody<T>(
-  request: NextRequest,
-  rawBody: string,
-  schema: ZodType<T>,
-): T {
+export function parseJsonBody<T>(request: NextRequest, rawBody: string, schema: ZodType<T>): T {
   ensureContentType(request, 'application/json');
 
   let parsed: unknown;
@@ -140,10 +129,7 @@ export function parseQuery<T>(request: NextRequest, schema: ZodType<T>): T {
   return parseWithSchema(query, schema, 'query', ValidationTaxonomy.QUERY_SCHEMA_FAILED);
 }
 
-export async function parsePathParams<T>(
-  params: Promise<unknown>,
-  schema: ZodType<T>,
-): Promise<T> {
+export async function parsePathParams<T>(params: Promise<unknown>, schema: ZodType<T>): Promise<T> {
   return parseWithSchema(await params, schema, 'params', ValidationTaxonomy.PARAMS_SCHEMA_FAILED);
 }
 

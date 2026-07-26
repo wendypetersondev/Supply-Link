@@ -17,12 +17,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z, ZodIssue } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { recordRequest } from '@/lib/api/metrics';
 import { fetchBaseFee, stroopsToXlm } from '@/lib/stellar/fees';
+import { gasEstimateQuerySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody, parseQuery } from '@/lib/api/validation';
 
 export const runtime = 'nodejs';
 
@@ -30,10 +31,10 @@ export const runtime = 'nodejs';
 // Values are measured medians; multiply by batchSize for batch operations.
 
 const CPU_BASELINES: Record<string, number> = {
-  register_product:    1_200_000,
-  add_tracking_event:  1_800_000,  // O(1) with keyed storage
-  get_events_page:     1_200_000,  // 10-entry page
-  transfer_ownership:    900_000,
+  register_product: 1_200_000,
+  add_tracking_event: 1_800_000, // O(1) with keyed storage
+  get_events_page: 1_200_000, // 10-entry page
+  transfer_ownership: 900_000,
 };
 
 // Soroban resource-fee multiplier: CPU instructions → stroops (approximate).
@@ -65,23 +66,7 @@ export interface GasEstimate {
   note: string;
 }
 
-const querySchema = z.object({
-  operation: z.enum([
-    'register_product',
-    'add_tracking_event',
-    'batch_register',
-    'batch_add_events',
-    'get_events_page',
-    'transfer_ownership',
-  ]),
-  batchSize: z.coerce.number().int().min(1).max(50).optional().default(1),
-});
-
-function buildEstimate(
-  operation: Operation,
-  batchSize: number,
-  inclusionFee: number,
-): GasEstimate {
+function buildEstimate(operation: Operation, batchSize: number, inclusionFee: number): GasEstimate {
   let baseCpu: number;
   let note: string;
 
@@ -143,28 +128,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return limited;
   }
 
-  const { searchParams } = new URL(request.url);
-  const raw = {
-    operation: searchParams.get('operation') ?? undefined,
-    batchSize: searchParams.get('batchSize') ?? undefined,
-  };
-
-  const parsed = querySchema.safeParse(raw);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((issue: ZodIssue) => ({
-      field: issue.path.join('.'),
-      location: 'query' as const,
-      message: issue.message,
-    }));
+  let operation: Operation;
+  let batchSize: number;
+  try {
+    ({ operation, batchSize } = parseQuery(request, gasEstimateQuerySchema));
+  } catch (error) {
     const res = withCors(
       request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Validation failed', { details }),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Request validation failed'),
     );
     recordRequest('GET /api/v1/gas-estimate', 400, Date.now() - start);
     return res;
   }
-
-  const { operation, batchSize } = parsed.data;
   const inclusionFee = await fetchBaseFee();
   const estimate = buildEstimate(operation as Operation, batchSize, inclusionFee);
 
@@ -185,34 +161,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return limited;
   }
 
-  let payload: unknown;
+  let body: { operation: Operation; batchSize: number };
   try {
-    payload = await request.json();
-  } catch {
+    body = parseJsonBody(request, await request.text(), gasEstimateQuerySchema);
+  } catch (error) {
     const res = withCors(
       request,
-      apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Request validation failed'),
     );
     recordRequest('POST /api/v1/gas-estimate', 400, Date.now() - start);
     return res;
   }
 
-  const parsed = querySchema.safeParse(payload);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((issue: ZodIssue) => ({
-      field: issue.path.join('.'),
-      location: 'body' as const,
-      message: issue.message,
-    }));
-    const res = withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Validation failed', { details }),
-    );
-    recordRequest('POST /api/v1/gas-estimate', 400, Date.now() - start);
-    return res;
-  }
-
-  const { operation, batchSize } = parsed.data;
+  const { operation, batchSize } = body;
   const inclusionFee = await fetchBaseFee();
   const estimate = buildEstimate(operation as Operation, batchSize, inclusionFee);
 

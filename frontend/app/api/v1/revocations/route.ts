@@ -6,7 +6,6 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
@@ -19,18 +18,12 @@ import {
   getRevocationStats,
 } from '@/lib/services/revocationRegistry';
 import type { RevocationType } from '@/lib/services/revocationRegistry';
+import { revocationBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const RevokeSchema = z.object({
-  subjectId: z.string().min(1),
-  type: z.enum(['certification', 'attestation', 'registry_record']),
-  productId: z.string().min(1),
-  revokedBy: z.string().min(1),
-  reason: z.string().max(500).optional(),
-});
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const start = Date.now();
@@ -100,33 +93,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
+    const body = parseJsonBody(request, await request.text(), revocationBodySchema);
+    const entry = revokeCredential(body);
+    recordRequest('POST /api/v1/revocations', 201, Date.now() - start);
+    return withCors(request, withCorrelationId(request, NextResponse.json(entry, { status: 201 })));
+  } catch (error) {
     return withCors(
       request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid request'),
     );
   }
-
-  const parsed = RevokeSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('POST /api/v1/revocations', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed', {
-        details: parsed.error.issues.map((e) => ({
-          field: e.path.join('.'),
-          location: 'body' as const,
-          message: e.message,
-        })),
-      }),
-    );
-  }
-
-  const entry = revokeCredential(parsed.data);
-
-  recordRequest('POST /api/v1/revocations', 201, Date.now() - start);
-  return withCors(request, withCorrelationId(request, NextResponse.json(entry, { status: 201 })));
 }

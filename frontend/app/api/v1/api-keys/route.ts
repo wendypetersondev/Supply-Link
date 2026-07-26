@@ -7,13 +7,14 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
-import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
+import { withCorrelationId, ErrorCode, apiError } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { withIdempotency } from '@/lib/api/idempotency';
 import { recordRequest } from '@/lib/api/metrics';
+import { apiKeyIssueBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import {
   issueApiKey,
   listApiKeys,
@@ -22,26 +23,6 @@ import {
 } from '@/lib/api/apiKeyRegistry';
 
 export const runtime = 'nodejs';
-
-// ── Validation ────────────────────────────────────────────────────────────────
-
-const issueKeySchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(1, 'name is required')
-    .max(128, 'name must be 128 characters or fewer'),
-  tier: z.enum(['partner', 'internal', 'auditor'] as const),
-  owner: z
-    .string()
-    .trim()
-    .min(1, 'owner is required')
-    .max(256, 'owner must be 256 characters or fewer'),
-  description: z.string().max(512).optional(),
-  expiresInDays: z.number().int().min(1).max(365).optional(),
-});
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -64,50 +45,42 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const response = await withIdempotency(request, async (req, rawBody) => {
-    let payload: unknown;
     try {
-      payload = JSON.parse(rawBody);
-    } catch {
-      return withCors(req, apiError(req, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'));
-    }
+      const body = parseJsonBody(req, rawBody, apiKeyIssueBodySchema);
+      const { name, tier, owner, description, expiresInDays } = body;
 
-    const parsed = issueKeySchema.safeParse(payload);
-    if (!parsed.success) {
-      const details = parsed.error.issues.map((i) => ({
-        field: i.path.join('.'),
-        location: 'body' as const,
-        message: i.message,
-      }));
+      const { record, plaintext } = await issueApiKey({
+        name,
+        tier: tier as ApiKeyTier,
+        owner,
+        description,
+        expiresInDays,
+      });
+
+      // Return the plaintext key ONCE — it cannot be retrieved again
+      const responseBody = {
+        keyId: record.keyId,
+        key: plaintext,
+        name: record.name,
+        tier: record.tier,
+        owner: record.owner,
+        description: record.description,
+        createdAt: record.createdAt,
+        expiresAt: record.expiresAt,
+        message: 'Store this key securely — it will not be shown again.',
+      };
+
       return withCors(
         req,
-        apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'Validation failed', { details }),
+        withCorrelationId(req, NextResponse.json(responseBody, { status: 201 })),
+      );
+    } catch (error) {
+      return withCors(
+        req,
+        handleValidationError(req, error) ??
+          apiError(req, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'),
       );
     }
-
-    const { name, tier, owner, description, expiresInDays } = parsed.data;
-
-    const { record, plaintext } = await issueApiKey({
-      name,
-      tier: tier as ApiKeyTier,
-      owner,
-      description,
-      expiresInDays,
-    });
-
-    // Return the plaintext key ONCE — it cannot be retrieved again
-    const body = {
-      keyId: record.keyId,
-      key: plaintext,
-      name: record.name,
-      tier: record.tier,
-      owner: record.owner,
-      description: record.description,
-      createdAt: record.createdAt,
-      expiresAt: record.expiresAt,
-      message: 'Store this key securely — it will not be shown again.',
-    };
-
-    return withCors(req, withCorrelationId(req, NextResponse.json(body, { status: 201 })));
   });
 
   recordRequest('POST /api/v1/api-keys', response.status, Date.now() - start);

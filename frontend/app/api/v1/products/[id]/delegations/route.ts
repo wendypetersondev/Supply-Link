@@ -9,9 +9,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { authenticateApiRequest } from '@/lib/api/auth';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordApprovalEvent } from '@/lib/api/approvalLog';
 import { delegationStore } from '@/lib/services/delegationStore';
+import { delegationCreateBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import type { Delegation } from '@/lib/types';
 
 export function OPTIONS(request: NextRequest) {
@@ -26,7 +28,7 @@ export async function GET(
   if (auth.error) return auth.error;
 
   const { id } = await params;
-  if (!getProductById(id)) {
+  if (!(await getProductRepository().getById(id))) {
     return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${id}`);
   }
 
@@ -43,51 +45,49 @@ export async function POST(
   if (auth.error) return auth.error;
 
   const { id } = await params;
-  if (!getProductById(id)) {
+  if (!(await getProductRepository().getById(id))) {
     return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${id}`);
   }
 
-  let body: Record<string, unknown>;
   try {
-    body = await request.json();
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
+    const body = parseJsonBody(request, await request.text(), delegationCreateBodySchema);
+    if (body.expiresAt <= Math.floor(Date.now() / 1000)) {
+      return apiError(
+        request,
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'expiresAt must be a future timestamp',
+      );
+    }
 
-  if (typeof body.delegatee !== 'string' || !body.delegatee.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing: delegatee');
-  }
-  if (typeof body.expiresAt !== 'number' || body.expiresAt <= Math.floor(Date.now() / 1000)) {
-    return apiError(
+    const delegation: Delegation = {
+      delegationId: Date.now(),
+      productId: id,
+      delegator: auth.apiKey ?? 'unknown',
+      delegatee: body.delegatee,
+      expiresAt: body.expiresAt,
+      revoked: false,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+
+    delegationStore.add(delegation);
+
+    recordApprovalEvent({
+      action: 'delegate_actor_authority',
+      productId: id,
+      actor: delegation.delegator,
+      target: delegation.delegatee,
+      success: true,
+    });
+
+    return withCors(
       request,
-      400,
-      ErrorCode.VALIDATION_ERROR,
-      'expiresAt must be a future timestamp',
+      withCorrelationId(request, NextResponse.json(delegation, { status: 201 })),
+    );
+  } catch (error) {
+    return (
+      handleValidationError(request, error) ??
+      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to create delegation')
     );
   }
-
-  const delegation: Delegation = {
-    delegationId: Date.now(),
-    productId: id,
-    delegator: auth.apiKey ?? 'unknown',
-    delegatee: body.delegatee as string,
-    expiresAt: body.expiresAt as number,
-    revoked: false,
-    createdAt: Math.floor(Date.now() / 1000),
-  };
-
-  delegationStore.add(delegation);
-
-  recordApprovalEvent({
-    action: 'delegate_actor_authority',
-    productId: id,
-    actor: delegation.delegator,
-    target: delegation.delegatee,
-    success: true,
-  });
-
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(delegation, { status: 201 })),
-  );
 }

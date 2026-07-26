@@ -3,7 +3,10 @@
  * POST /api/v1/contract/pause  — set pause state (guardian only)
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { apiError, ErrorCode } from '@/lib/api/errors';
+import { contractPauseBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 // In production this would read from / write to the Soroban contract via RPC.
 // For now we use a module-level variable as a lightweight stand-in that
@@ -20,25 +23,23 @@ export async function GET() {
   return NextResponse.json(pauseState);
 }
 
-export async function POST(request: Request) {
-  let body: { paused?: boolean; reason?: string };
+export async function POST(request: NextRequest) {
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    const body = parseJsonBody(request, await request.text(), contractPauseBodySchema);
+
+    // TODO: verify caller is an authorized guardian via Soroban auth check.
+    pauseState = {
+      paused: body.paused,
+      pausedBy: 'guardian', // replace with verified caller address
+      pausedAt: body.paused ? Math.floor(Date.now() / 1000) : undefined,
+      reason: body.reason,
+    };
+
+    return NextResponse.json(pauseState);
+  } catch (error) {
+    return (
+      handleValidationError(request, error) ??
+      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to update pause state')
+    );
   }
-
-  if (typeof body.paused !== 'boolean') {
-    return NextResponse.json({ error: '"paused" must be a boolean' }, { status: 400 });
-  }
-
-  // TODO: verify caller is an authorized guardian via Soroban auth check.
-  pauseState = {
-    paused: body.paused,
-    pausedBy: 'guardian', // replace with verified caller address
-    pausedAt: body.paused ? Math.floor(Date.now() / 1000) : undefined,
-    reason: body.reason,
-  };
-
-  return NextResponse.json(pauseState);
 }

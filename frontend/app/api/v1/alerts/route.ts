@@ -6,12 +6,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
-import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
+import { withCorrelationId } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { alertsListQuerySchema, createAlertBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody, parseQuery } from '@/lib/api/validation';
 import {
   createAlert,
   listAlerts,
@@ -24,20 +25,6 @@ import { notifyWebhooksOfProductEvent } from '@/lib/webhooks/processor';
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const CreateAlertSchema = z.object({
-  productId: z.string().min(1),
-  productName: z.string().min(1),
-  title: z.string().min(1).max(200),
-  message: z.string().min(1).max(2000),
-  severity: z.enum(['info', 'warning', 'high', 'critical']),
-  distribution: z.object({
-    channels: z.array(z.enum(['in-app', 'webhook', 'email'])).min(1),
-    recipients: z.array(z.string()).default([]),
-    requireAcknowledgement: z.boolean().default(false),
-  }),
-  createdBy: z.string().min(1),
-});
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const start = Date.now();
@@ -59,11 +46,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  const { searchParams } = request.nextUrl;
-  const productId = searchParams.get('productId') ?? undefined;
-  const activeOnly = searchParams.get('active') === 'true';
+  let query;
+  try {
+    query = parseQuery(request, alertsListQuerySchema);
+  } catch (error) {
+    recordRequest('GET /api/v1/alerts', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
+  }
 
-  const alerts = activeOnly ? listActiveAlerts(productId) : listAlerts(productId);
+  const alerts = query.active ? listActiveAlerts(query.productId) : listAlerts(query.productId);
   const stats = getAlertStats();
 
   recordRequest('GET /api/v1/alerts', 200, Date.now() - start);
@@ -96,35 +87,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let body: unknown;
+  let body;
   try {
-    body = await request.json();
-  } catch {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
-    );
+    body = parseJsonBody(request, await request.text(), createAlertBodySchema);
+  } catch (error) {
+    recordRequest('POST /api/v1/alerts', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
   }
 
-  const parsed = CreateAlertSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('POST /api/v1/alerts', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(
-        request,
-        422,
-        ErrorCode.VALIDATION_ERROR,
-        'Validation failed: ' + parsed.error.issues.map((i) => i.message).join(', '),
-      ),
-    );
-  }
-
-  const alert = createAlert(parsed.data);
+  const alert = createAlert(body);
 
   // Fan out to webhook subscribers if webhook channel is enabled
-  if (parsed.data.distribution.channels.includes('webhook')) {
-    void notifyWebhooksOfProductEvent('product_updated', parsed.data.productId, {
+  if (body.distribution.channels.includes('webhook')) {
+    void notifyWebhooksOfProductEvent('product_updated', body.productId, {
       alertId: alert.id,
       severity: alert.severity,
       title: alert.title,

@@ -10,6 +10,8 @@ import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { saveQuery, getSavedQueries } from '@/lib/services/searchService';
 import { recordRequest } from '@/lib/api/metrics';
+import { savedQueryBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -64,26 +66,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(await request.text());
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
+    const body = parseJsonBody(request, await request.text(), savedQueryBodySchema);
+    const userId = request.headers.get('x-user-id') || 'default-user';
+    const saved = saveQuery(userId, body.name, body.query);
+    recordRequest('POST /api/v1/products/saved-queries', 201, Date.now() - start);
+    return withCors(request, withCorrelationId(request, NextResponse.json(saved, { status: 201 })));
+  } catch (error) {
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
+    );
   }
-
-  const body = payload as Record<string, unknown>;
-
-  if (typeof body.name !== 'string' || !body.name.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: name');
-  }
-
-  if (!body.query || typeof body.query !== 'object') {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: query');
-  }
-
-  const userId = request.headers.get('x-user-id') || 'default-user';
-  const saved = saveQuery(userId, body.name as string, body.query as Record<string, unknown>);
-
-  recordRequest('POST /api/v1/products/saved-queries', 201, Date.now() - start);
-  return withCors(request, withCorrelationId(request, NextResponse.json(saved, { status: 201 })));
 }

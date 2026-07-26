@@ -11,23 +11,18 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { checkTransferCompliance } from '@/lib/transferCompliance';
+import { transferPreflightBodySchema } from '@/lib/api/schemas';
+import type { TransferPreflightBody } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export const runtime = 'nodejs';
-
-const bodySchema = z.object({
-  productId: z.string().trim().min(1).max(128),
-  newOwner: z.string().trim().min(1).max(256),
-  walletAddress: z.string().trim().max(256).optional(),
-  hasPendingEscrow: z.boolean().optional(),
-});
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -52,36 +47,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
+  let parsed: TransferPreflightBody;
   try {
-    payload = await request.json();
-  } catch {
-    const res = withCors(
-      request,
-      apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'),
-    );
+    parsed = parseJsonBody(request, await request.text(), transferPreflightBodySchema);
+  } catch (error) {
     recordRequest('POST /api/v1/transfer-preflight', 400, Date.now() - start);
-    return res;
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid request'),
+    );
   }
 
-  const parsed = bodySchema.safeParse(payload);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((i) => ({
-      field: i.path.join('.'),
-      location: 'body' as const,
-      message: i.message,
-    }));
-    const res = withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Validation failed', { details }),
-    );
-    recordRequest('POST /api/v1/transfer-preflight', 400, Date.now() - start);
-    return res;
-  }
+  const { productId, newOwner, walletAddress, hasPendingEscrow } = parsed;
 
-  const { productId, newOwner, walletAddress, hasPendingEscrow } = parsed.data;
-
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     const res = withCors(
       request,

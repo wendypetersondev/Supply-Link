@@ -19,8 +19,10 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { searchProducts } from '@/lib/services/searchService';
-import { getAllProducts } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
+import { productSearchBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -45,24 +47,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(await request.text());
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
+    const query = parseJsonBody(request, await request.text(), productSearchBodySchema);
+    const result = searchProducts(getAllProducts(), query);
+    recordRequest('POST /api/v1/products/search', 200, Date.now() - start);
+    return withCors(
+      request,
+      withCorrelationId(request, NextResponse.json(result, { status: 200 })),
+    );
+  } catch (error) {
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
+    );
   }
-
-  const body = payload as Record<string, unknown>;
-  const query = {
-    text: typeof body.text === 'string' ? body.text : undefined,
-    filters: body.filters as Record<string, unknown> | undefined,
-    offset: typeof body.offset === 'number' ? body.offset : 0,
-    limit: typeof body.limit === 'number' ? body.limit : 50,
-  };
-
-  const products = getAllProducts();
-  const result = searchProducts(products, query);
-
-  recordRequest('POST /api/v1/products/search', 200, Date.now() - start);
-  return withCors(request, withCorrelationId(request, NextResponse.json(result, { status: 200 })));
 }

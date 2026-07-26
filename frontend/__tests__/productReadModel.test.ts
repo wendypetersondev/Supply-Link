@@ -15,22 +15,30 @@ vi.mock('@/lib/stellar/contract', () => ({
   },
 }));
 
+// The read model falls back to the fixture repositories, which read these
+// arrays through `@/lib/data`'s mock store.
 vi.mock('@/lib/mock/products', () => ({
-  getProductById: vi.fn((id: string) =>
-    id === 'mock-001'
-      ? {
-          id: 'mock-001',
-          name: 'Mock Product',
-          origin: 'Mock Origin',
-          owner: 'GMOCK',
-          timestamp: 1000,
-          active: true,
-          authorizedActors: [],
-        }
-      : undefined,
-  ),
-  getEventsByProductId: vi.fn(() => []),
-  getAllProducts: vi.fn(() => []),
+  MOCK_PRODUCTS: [
+    {
+      id: 'mock-001',
+      name: 'Mock Product',
+      origin: 'Mock Origin',
+      owner: 'GMOCK',
+      timestamp: 1000,
+      active: true,
+      authorizedActors: [],
+    },
+  ],
+  MOCK_EVENTS: [
+    {
+      productId: 'prod-001',
+      location: 'Mock Location',
+      actor: 'GMOCK',
+      timestamp: 1,
+      eventType: 'HARVEST',
+      metadata: '{}',
+    },
+  ],
 }));
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -114,18 +122,6 @@ describe('productReadModel', () => {
     const { contractClient } = await import('@/lib/stellar/contract');
     vi.mocked(contractClient.getTrackingEvents).mockRejectedValueOnce(new Error('timeout'));
 
-    const { getEventsByProductId } = await import('@/lib/mock/products');
-    vi.mocked(getEventsByProductId).mockReturnValueOnce([
-      {
-        productId: 'prod-001',
-        location: 'Mock Location',
-        actor: 'GMOCK',
-        timestamp: 1,
-        eventType: 'HARVEST',
-        metadata: '{}',
-      },
-    ]);
-
     const { getTrackingEvents } = await import('@/lib/services/productReadModel');
     const events = await getTrackingEvents('prod-001');
 
@@ -135,8 +131,22 @@ describe('productReadModel', () => {
   it('bypassCache forces a fresh contract read', async () => {
     const { contractClient } = await import('@/lib/stellar/contract');
     vi.mocked(contractClient.getProduct)
-      .mockResolvedValueOnce({ name: 'First', origin: 'A', owner: 'G1', timestamp: 1, active: true, authorized_actors: [] })
-      .mockResolvedValueOnce({ name: 'Second', origin: 'B', owner: 'G2', timestamp: 2, active: true, authorized_actors: [] });
+      .mockResolvedValueOnce({
+        name: 'First',
+        origin: 'A',
+        owner: 'G1',
+        timestamp: 1,
+        active: true,
+        authorized_actors: [],
+      })
+      .mockResolvedValueOnce({
+        name: 'Second',
+        origin: 'B',
+        owner: 'G2',
+        timestamp: 2,
+        active: true,
+        authorized_actors: [],
+      });
 
     const { getProduct } = await import('@/lib/services/productReadModel');
     const first = await getProduct('prod-001');

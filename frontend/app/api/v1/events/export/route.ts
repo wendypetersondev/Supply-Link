@@ -13,11 +13,13 @@
  * Rate limiting: publicRead preset (elevated to authenticated for wallet users)
  */
 
-import { NextResponse } from 'next/server';
-import { z } from 'zod';
-import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
-import { apiError, ErrorCode } from '@/lib/api/errors';
-import { getProductById, getEventsByProductId } from '@/lib/mock/products';
+import { NextRequest, NextResponse } from 'next/server';
+import { withCors, handleOptions } from '@/lib/api/cors';
+import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
+import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
+import { authenticateApiRequest } from '@/lib/api/auth';
+import { recordRequest } from '@/lib/api/metrics';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { buildInterchangePayload } from '@/lib/interchange/eventExporter';
 
 export const runtime = 'nodejs';
@@ -56,10 +58,35 @@ export const { GET, OPTIONS } = defineRoute(
 
       const contentType = format === 'jsonld' ? 'application/ld+json' : 'application/json';
 
-      return NextResponse.json(payload, {
-        status: 200,
-        headers: { 'Content-Type': contentType },
-      });
-    },
-  },
-);
+  const offset = Math.max(0, parseInt(searchParams.get('offset') ?? '0', 10) || 0);
+  const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit') ?? '100', 10) || 100));
+  const format = searchParams.get('format') ?? 'json';
+
+  const product = await getProductRepository().getById(productId);
+  if (!product) {
+    const res = withCors(
+      request,
+      apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Product '${productId}' not found`),
+    );
+    recordRequest('GET /api/v1/events/export', 404, Date.now() - start);
+    return res;
+  }
+
+  // Fetch events sorted oldest-first (canonical provenance order)
+  const allEvents = (await getEventRepository().listByProduct(productId)).sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
+
+  const payload = buildInterchangePayload(product, allEvents, { offset, limit });
+
+  const contentType = format === 'jsonld' ? 'application/ld+json' : 'application/json';
+
+  const inner = NextResponse.json(payload, {
+    status: 200,
+    headers: { 'Content-Type': contentType },
+  });
+
+  const response = withCors(request, withCorrelationId(request, inner));
+  recordRequest('GET /api/v1/events/export', response.status, Date.now() - start);
+  return response;
+}

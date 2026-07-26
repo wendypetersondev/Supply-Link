@@ -6,12 +6,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { insuranceClaimCreateBodySchema, insuranceClaimUpdateBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import {
   getCoverage,
   addClaimProof,
@@ -22,20 +23,6 @@ import type { ClaimProofStatus } from '@/lib/services/insuranceCoverage';
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const AddClaimSchema = z.object({
-  productId: z.string().min(1),
-  description: z.string().min(1).max(500),
-  proofRef: z.string().min(1).max(500),
-  documentHash: z.string().max(128).optional(),
-  claimant: z.string().min(1),
-});
-
-const UpdateClaimSchema = z.object({
-  claimId: z.string().min(1),
-  status: z.enum(['pending', 'verified', 'rejected']),
-  verifierNotes: z.string().max(500).optional(),
-});
 
 export async function POST(
   request: NextRequest,
@@ -71,32 +58,15 @@ export async function POST(
     );
   }
 
-  let body: unknown;
+  let body;
   try {
-    body = await request.json();
-  } catch {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
-    );
+    body = parseJsonBody(request, await request.text(), insuranceClaimCreateBodySchema);
+  } catch (error) {
+    recordRequest('POST /api/v1/insurance/[id]/claims', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
   }
 
-  const parsed = AddClaimSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('POST /api/v1/insurance/[id]/claims', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed', {
-        details: parsed.error.issues.map((e) => ({
-          field: e.path.join('.'),
-          location: 'body' as const,
-          message: e.message,
-        })),
-      }),
-    );
-  }
-
-  const proof = addClaimProof({ coverageId: id, ...parsed.data });
+  const proof = addClaimProof({ coverageId: id, ...body });
   if (!proof) {
     return withCors(
       request,
@@ -122,30 +92,19 @@ export async function PATCH(
 
   const { id } = await params;
 
-  let body: unknown;
+  let body;
   try {
-    body = await request.json();
-  } catch {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
-    );
-  }
-
-  const parsed = UpdateClaimSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('PATCH /api/v1/insurance/[id]/claims', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed'),
-    );
+    body = parseJsonBody(request, await request.text(), insuranceClaimUpdateBodySchema);
+  } catch (error) {
+    recordRequest('PATCH /api/v1/insurance/[id]/claims', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
   }
 
   const updated = updateClaimProofStatus(
     id,
-    parsed.data.claimId,
-    parsed.data.status as ClaimProofStatus,
-    parsed.data.verifierNotes,
+    body.claimId,
+    body.status as ClaimProofStatus,
+    body.verifierNotes,
   );
 
   if (!updated) {

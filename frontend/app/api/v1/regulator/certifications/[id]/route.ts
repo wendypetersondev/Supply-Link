@@ -10,6 +10,8 @@ import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { recordRequest } from '@/lib/api/metrics';
+import { regulatorCertificationRevokeBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import {
   getCertification,
   revokeCertification,
@@ -70,37 +72,33 @@ export async function DELETE(
     return limited;
   }
 
-  let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
-  } catch {
-    // body is optional for DELETE
-  }
-
-  const { actor, note } = body as Record<string, unknown>;
-
-  if (!actor || typeof actor !== 'string') {
-    return withCors(request, apiError(request, 400, ErrorCode.MISSING_FIELDS, 'actor is required'));
-  }
-
-  const revoked = revokeCertification(id, actor, typeof note === 'string' ? note : undefined);
-  if (!revoked) {
-    const existing = getCertification(id);
-    if (!existing) {
+    const { actor, note } = parseJsonBody(
+      request,
+      await request.text(),
+      regulatorCertificationRevokeBodySchema,
+    );
+    const revoked = revokeCertification(id, actor, note);
+    if (!revoked) {
+      const existing = getCertification(id);
+      if (!existing)
+        return withCors(
+          request,
+          apiError(request, 404, ErrorCode.VALIDATION_ERROR, 'Certification not found'),
+        );
       return withCors(
         request,
-        apiError(request, 404, ErrorCode.VALIDATION_ERROR, 'Certification not found'),
+        apiError(request, 409, ErrorCode.IDEMPOTENCY_CONFLICT, 'Certification is already revoked'),
       );
     }
+    const res = NextResponse.json({ certification: revoked }, { status: 200 });
+    recordRequest('DELETE /api/v1/regulator/certifications/[id]', 200, Date.now() - start);
+    return withCors(request, withCorrelationId(request, res));
+  } catch (error) {
     return withCors(
       request,
-      apiError(request, 409, ErrorCode.IDEMPOTENCY_CONFLICT, 'Certification is already revoked'),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid request'),
     );
   }
-
-  console.log('[regulator cert] revoked', { id, actor });
-
-  const res = NextResponse.json({ certification: revoked }, { status: 200 });
-  recordRequest('DELETE /api/v1/regulator/certifications/[id]', 200, Date.now() - start);
-  return withCors(request, withCorrelationId(request, res));
 }

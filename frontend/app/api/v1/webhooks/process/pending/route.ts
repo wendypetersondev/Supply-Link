@@ -6,6 +6,9 @@ import {
   WEBHOOK_PROCESS_LOCK_TTL_SECONDS,
 } from '@/lib/webhooks/config';
 import type { TrackingEvent } from '@/lib/types';
+import { apiError, ErrorCode } from '@/lib/api/errors';
+import { webhookProcessPendingBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 const TICK_LOCK_KEY = 'webhook:process:tick:lock';
 
@@ -25,8 +28,8 @@ const TICK_LOCK_KEY = 'webhook:process:tick:lock';
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json().catch(() => ({}) as Record<string, unknown>);
-    const event = body?.event as TrackingEvent | undefined;
+    const body = parseJsonBody(request, await request.text(), webhookProcessPendingBodySchema);
+    const event = body.event as TrackingEvent | undefined;
 
     let eventResult = {
       delivered: true,
@@ -36,10 +39,6 @@ export async function POST(request: NextRequest) {
     };
 
     if (event) {
-      if (!event.productId || !event.eventType) {
-        return NextResponse.json({ error: 'Invalid event structure' }, { status: 400 });
-      }
-
       // Idempotency: dedupe repeated deliveries of the same tracking event.
       const dedupeKey = `webhook:event:seen:${event.productId}:${event.eventType}:${event.timestamp}`;
       const isNewEvent = await claimOnce(dedupeKey, WEBHOOK_EVENT_DEDUPE_TTL_SECONDS);
@@ -66,7 +65,9 @@ export async function POST(request: NextRequest) {
       { status: eventResult.delivered ? 200 : 500 },
     );
   } catch (err) {
+    const validationResponse = handleValidationError(request, err);
+    if (validationResponse) return validationResponse;
     console.error('Failed to process webhooks:', err);
-    return NextResponse.json({ error: 'Failed to process webhooks' }, { status: 500 });
+    return apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to process webhooks');
   }
 }

@@ -3,12 +3,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { certificationRecordRevokeBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import { kvStore } from '@/lib/kv';
 import type { CertificationRegistryRecord } from '@/lib/types';
 
@@ -19,11 +20,6 @@ const TTL = 10 * 365 * 24 * 60 * 60;
 function recordsKey(productId: string): string {
   return `cert-registry:records:${productId}`;
 }
-
-const revokeSchema = z.object({
-  productId: z.string().trim().min(1).max(128),
-  issuerAddress: z.string().trim().min(1).max(256),
-});
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -60,27 +56,14 @@ export async function DELETE(
     return auth.error;
   }
 
-  let payload: unknown;
+  let body;
   try {
-    payload = await request.json();
-  } catch {
-    return withCors(request, apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'));
+    body = parseJsonBody(request, await request.text(), certificationRecordRevokeBodySchema);
+  } catch (error) {
+    return withCors(request, handleValidationError(request, error)!);
   }
 
-  const parsed = revokeSchema.safeParse(payload);
-  if (!parsed.success) {
-    return withCors(
-      request,
-      apiError(
-        request,
-        400,
-        ErrorCode.VALIDATION_ERROR,
-        parsed.error.issues[0]?.message ?? 'Validation error',
-      ),
-    );
-  }
-
-  const { productId, issuerAddress } = parsed.data;
+  const { productId, issuerAddress } = body;
 
   const raw = await kvStore.get(recordsKey(productId));
   const records: CertificationRegistryRecord[] = raw

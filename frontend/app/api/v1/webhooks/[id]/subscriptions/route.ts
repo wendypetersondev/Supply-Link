@@ -32,6 +32,11 @@ import type {
   WebhookEventType,
   ProductEventType,
 } from '@/lib/webhooks/types';
+import {
+  webhookSubscriptionCreateBodySchema,
+  webhookSubscriptionPatchBodySchema,
+} from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -75,139 +80,126 @@ async function createNewSubscription(
     return apiError(req, 404, ErrorCode.VALIDATION_ERROR, `Webhook not found: ${webhookId}`);
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
+    const body = parseJsonBody(req, rawBody, webhookSubscriptionCreateBodySchema);
 
-  const body = payload as Record<string, unknown>;
+    // Validate event types
 
-  // Validate required fields
-  if (typeof body.name !== 'string' || !body.name.trim()) {
-    return apiError(req, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: name');
-  }
+    const validEventTypes: WebhookEventType[] = ['TRACKING_EVENT_CREATED', 'PRODUCT_EVENT_CHANGED'];
+    const eventTypes = body.eventTypes as WebhookEventType[];
+    if (!eventTypes.every((et) => validEventTypes.includes(et))) {
+      return apiError(
+        req,
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `Invalid eventTypes. Allowed: ${validEventTypes.join(', ')}`,
+      );
+    }
 
-  // Validate event types
-  if (!Array.isArray(body.eventTypes) || body.eventTypes.length === 0) {
-    return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'eventTypes must be a non-empty array');
-  }
+    // Validate product event filter if provided
+    let productEventFilter: { types?: ProductEventType[]; productIds?: string[] } | undefined;
+    if (body.productEventFilter) {
+      const filter = body.productEventFilter;
+      productEventFilter = {};
 
-  const validEventTypes: WebhookEventType[] = ['TRACKING_EVENT_CREATED', 'PRODUCT_EVENT_CHANGED'];
-  const eventTypes = body.eventTypes as WebhookEventType[];
-  if (!eventTypes.every((et) => validEventTypes.includes(et))) {
-    return apiError(
+      const validProductEventTypes: ProductEventType[] = [
+        'product_registered',
+        'product_updated',
+        'event_added',
+        'actor_authorized',
+        'actor_removed',
+        'compliance_policy_updated',
+      ];
+
+      if (filter.types) {
+        const types = filter.types as ProductEventType[];
+        if (!types.every((t) => validProductEventTypes.includes(t))) {
+          return apiError(
+            req,
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            `Invalid product event types. Allowed: ${validProductEventTypes.join(', ')}`,
+          );
+        }
+        productEventFilter.types = types;
+      }
+
+      if (filter.productIds) {
+        productEventFilter.productIds = filter.productIds;
+      }
+    }
+
+    // Validate retry policy if provided
+    let retryPolicy: { maxRetries?: number; backoffMs?: number; maxBackoffMs?: number } | undefined;
+    if (body.retryPolicy) {
+      const policy = body.retryPolicy;
+      retryPolicy = {};
+
+      if (policy.maxRetries !== undefined) {
+        if (policy.maxRetries < 0 || policy.maxRetries > 10) {
+          return apiError(
+            req,
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            'maxRetries must be between 0 and 10',
+          );
+        }
+        retryPolicy.maxRetries = policy.maxRetries;
+      }
+
+      if (policy.backoffMs !== undefined) {
+        if (policy.backoffMs < 100 || policy.backoffMs > 60000) {
+          return apiError(
+            req,
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            'backoffMs must be between 100 and 60000',
+          );
+        }
+        retryPolicy.backoffMs = policy.backoffMs;
+      }
+
+      if (policy.maxBackoffMs !== undefined) {
+        if (policy.maxBackoffMs < (policy.backoffMs ?? 0) || policy.maxBackoffMs > 86400000) {
+          return apiError(
+            req,
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            'maxBackoffMs must be >= backoffMs and <= 86400000',
+          );
+        }
+        retryPolicy.maxBackoffMs = policy.maxBackoffMs;
+      }
+    }
+
+    // Create subscription
+    const subscription = await createSubscription(webhookId, body.name, eventTypes, {
+      description: body.description,
+      productEventFilter,
+      retryPolicy,
+    });
+
+    const response: WebhookSubscriptionResponse = {
+      id: subscription.id,
+      webhookId: subscription.webhookId,
+      name: subscription.name,
+      description: subscription.description,
+      eventTypes: subscription.eventTypes,
+      productEventFilter: subscription.productEventFilter,
+      retryPolicy: subscription.retryPolicy,
+      active: subscription.active,
+      createdAt: subscription.createdAt,
+      lastTriggeredAt: subscription.lastTriggeredAt,
+    };
+
+    return withCors(req, withCorrelationId(req, NextResponse.json(response, { status: 201 })));
+  } catch (error) {
+    return withCors(
       req,
-      400,
-      ErrorCode.VALIDATION_ERROR,
-      `Invalid eventTypes. Allowed: ${validEventTypes.join(', ')}`,
+      handleValidationError(req, error) ??
+        apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
     );
   }
-
-  // Validate product event filter if provided
-  let productEventFilter: { types?: ProductEventType[]; productIds?: string[] } | undefined;
-  if (body.productEventFilter && typeof body.productEventFilter === 'object') {
-    const filter = body.productEventFilter as Record<string, unknown>;
-    productEventFilter = {};
-
-    const validProductEventTypes: ProductEventType[] = [
-      'product_registered',
-      'product_updated',
-      'event_added',
-      'actor_authorized',
-      'actor_removed',
-      'compliance_policy_updated',
-    ];
-
-    if (Array.isArray(filter.types)) {
-      const types = filter.types as ProductEventType[];
-      if (!types.every((t) => validProductEventTypes.includes(t))) {
-        return apiError(
-          req,
-          400,
-          ErrorCode.VALIDATION_ERROR,
-          `Invalid product event types. Allowed: ${validProductEventTypes.join(', ')}`,
-        );
-      }
-      productEventFilter.types = types;
-    }
-
-    if (Array.isArray(filter.productIds)) {
-      if (!filter.productIds.every((id) => typeof id === 'string')) {
-        return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'productIds must be string[]');
-      }
-      productEventFilter.productIds = filter.productIds as string[];
-    }
-  }
-
-  // Validate retry policy if provided
-  let retryPolicy: { maxRetries?: number; backoffMs?: number; maxBackoffMs?: number } | undefined;
-  if (body.retryPolicy && typeof body.retryPolicy === 'object') {
-    const policy = body.retryPolicy as Record<string, unknown>;
-    retryPolicy = {};
-
-    if (typeof policy.maxRetries === 'number') {
-      if (policy.maxRetries < 0 || policy.maxRetries > 10) {
-        return apiError(
-          req,
-          400,
-          ErrorCode.VALIDATION_ERROR,
-          'maxRetries must be between 0 and 10',
-        );
-      }
-      retryPolicy.maxRetries = policy.maxRetries;
-    }
-
-    if (typeof policy.backoffMs === 'number') {
-      if (policy.backoffMs < 100 || policy.backoffMs > 60000) {
-        return apiError(
-          req,
-          400,
-          ErrorCode.VALIDATION_ERROR,
-          'backoffMs must be between 100 and 60000',
-        );
-      }
-      retryPolicy.backoffMs = policy.backoffMs;
-    }
-
-    if (typeof policy.maxBackoffMs === 'number') {
-      if (
-        policy.maxBackoffMs < (typeof policy.backoffMs === 'number' ? policy.backoffMs : 0) ||
-        policy.maxBackoffMs > 86400000
-      ) {
-        return apiError(
-          req,
-          400,
-          ErrorCode.VALIDATION_ERROR,
-          'maxBackoffMs must be >= backoffMs and <= 86400000',
-        );
-      }
-      retryPolicy.maxBackoffMs = policy.maxBackoffMs;
-    }
-  }
-
-  // Create subscription
-  const subscription = await createSubscription(webhookId, body.name as string, eventTypes, {
-    description: typeof body.description === 'string' ? body.description : undefined,
-    productEventFilter,
-    retryPolicy,
-  });
-
-  const response: WebhookSubscriptionResponse = {
-    id: subscription.id,
-    webhookId: subscription.webhookId,
-    name: subscription.name,
-    description: subscription.description,
-    eventTypes: subscription.eventTypes,
-    productEventFilter: subscription.productEventFilter,
-    retryPolicy: subscription.retryPolicy,
-    active: subscription.active,
-    createdAt: subscription.createdAt,
-    lastTriggeredAt: subscription.lastTriggeredAt,
-  };
-
-  return withCors(req, withCorrelationId(req, NextResponse.json(response, { status: 201 })));
 }
 
 async function getSubscriptionDetails(
@@ -269,53 +261,51 @@ async function updateSubscriptionDetails(
     );
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
+    const body = parseJsonBody(req, rawBody, webhookSubscriptionPatchBodySchema);
+    const updates: Record<string, unknown> = {};
 
-  const body = payload as Record<string, unknown>;
-  const updates: Record<string, unknown> = {};
-
-  // Allow updating active status
-  if (typeof body.active === 'boolean') {
-    updates.active = body.active;
-  }
-
-  // Allow updating name
-  if (typeof body.name === 'string') {
-    if (!body.name.trim()) {
-      return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'name cannot be empty');
+    // Allow updating active status
+    if (body.active !== undefined) {
+      updates.active = body.active;
     }
-    updates.name = body.name;
+
+    // Allow updating name
+    if (body.name !== undefined) {
+      updates.name = body.name;
+    }
+
+    // Allow updating description
+    if (body.description !== undefined) {
+      updates.description = body.description;
+    }
+
+    const updated = await updateSubscription(subscriptionId, updates);
+    if (!updated) {
+      return apiError(req, 404, ErrorCode.VALIDATION_ERROR, 'Subscription not found');
+    }
+
+    const response: WebhookSubscriptionResponse = {
+      id: updated.id,
+      webhookId: updated.webhookId,
+      name: updated.name,
+      description: updated.description,
+      eventTypes: updated.eventTypes,
+      productEventFilter: updated.productEventFilter,
+      retryPolicy: updated.retryPolicy,
+      active: updated.active,
+      createdAt: updated.createdAt,
+      lastTriggeredAt: updated.lastTriggeredAt,
+    };
+
+    return withCors(req, withCorrelationId(req, NextResponse.json(response, { status: 200 })));
+  } catch (error) {
+    return withCors(
+      req,
+      handleValidationError(req, error) ??
+        apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
+    );
   }
-
-  // Allow updating description
-  if (typeof body.description === 'string') {
-    updates.description = body.description;
-  }
-
-  const updated = await updateSubscription(subscriptionId, updates);
-  if (!updated) {
-    return apiError(req, 404, ErrorCode.VALIDATION_ERROR, 'Subscription not found');
-  }
-
-  const response: WebhookSubscriptionResponse = {
-    id: updated.id,
-    webhookId: updated.webhookId,
-    name: updated.name,
-    description: updated.description,
-    eventTypes: updated.eventTypes,
-    productEventFilter: updated.productEventFilter,
-    retryPolicy: updated.retryPolicy,
-    active: updated.active,
-    createdAt: updated.createdAt,
-    lastTriggeredAt: updated.lastTriggeredAt,
-  };
-
-  return withCors(req, withCorrelationId(req, NextResponse.json(response, { status: 200 })));
 }
 
 async function deleteSubscriptionDetails(

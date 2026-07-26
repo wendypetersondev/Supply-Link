@@ -12,7 +12,7 @@ import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { getEventSequence } from '@/lib/api/eventSequence';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -30,7 +30,7 @@ export async function GET(
     return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid product ID');
   }
 
-  const product = getProductById(id);
+  const product = await getProductRepository().getById(id);
   if (!product) {
     return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${id}`);
   }

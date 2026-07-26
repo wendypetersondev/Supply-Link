@@ -7,10 +7,15 @@
  * Idempotency: POST requests via Idempotency-Key header
  */
 
-import { NextResponse } from 'next/server';
-import { z } from 'zod';
-import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
-import { apiError, ErrorCode } from '@/lib/api/errors';
+import { NextRequest, NextResponse } from 'next/server';
+import { withCors, handleOptions } from '@/lib/api/cors';
+import { apiError, withCorrelationId } from '@/lib/api/errors';
+import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
+import { authenticateRegistryKey } from '@/lib/api/apiKeyAuth';
+import { withIdempotency } from '@/lib/api/idempotency';
+import { recordRequest } from '@/lib/api/metrics';
+import { attestationCreateBodySchema, attestationListQuerySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody, parseQuery } from '@/lib/api/validation';
 import {
   addAttestation,
   listAttestationsForProduct,
@@ -19,52 +24,64 @@ import {
 
 export const runtime = 'nodejs';
 
-// ── Schemas ───────────────────────────────────────────────────────────────────
+export function OPTIONS(request: NextRequest) {
+  return handleOptions(request);
+}
 
-const addAttestationSchema = z.object({
-  productId: z
-    .string()
-    .trim()
-    .min(1, 'productId is required')
-    .max(128, 'productId must be 128 characters or fewer'),
-  issuerAddress: z
-    .string()
-    .trim()
-    .min(1, 'issuerAddress is required')
-    .max(256, 'issuerAddress must be 256 characters or fewer'),
-  issuerName: z
-    .string()
-    .trim()
-    .min(1, 'issuerName is required')
-    .max(256, 'issuerName must be 256 characters or fewer'),
-  trustLevel: z.enum(['verified', 'trusted', 'community'] as const),
-  attestationType: z.enum([
-    'audit',
-    'certification',
-    'inspection',
-    'compliance',
-    'sustainability',
-    'custom',
-  ] as const),
-  summary: z
-    .string()
-    .trim()
-    .min(1, 'summary is required')
-    .max(512, 'summary must be 512 characters or fewer'),
-  signedReference: z
-    .string()
-    .trim()
-    .min(1, 'signedReference is required')
-    .max(2048, 'signedReference must be 2048 characters or fewer'),
-  reportUrl: z.string().url('reportUrl must be a valid URL').optional(),
-  expiresInDays: z.number().int().min(1).max(3650).optional(),
-  metadata: z.string().max(4096, 'metadata must be 4096 characters or fewer').optional(),
-});
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const start = Date.now();
 
-const querySchema = z.object({
-  productId: z.string().optional(),
-  issuerAddress: z.string().optional(),
-});
+  const limited = applyRateLimit(request, 'POST /api/v1/attestations', RATE_LIMIT_PRESETS.default);
+  if (limited) {
+    recordRequest('POST /api/v1/attestations', 429, Date.now() - start);
+    return limited;
+  }
+
+  // Auditor tier or higher required
+  const auth = await authenticateRegistryKey(request, 'auditor', 'POST /api/v1/attestations');
+  if (auth.error) {
+    recordRequest('POST /api/v1/attestations', 401, Date.now() - start);
+    return auth.error;
+  }
+
+  const response = await withIdempotency(request, async (req, rawBody) => {
+    try {
+      const body = parseJsonBody(req, rawBody, attestationCreateBodySchema);
+      const record = await addAttestation(body);
+      return withCors(req, withCorrelationId(req, NextResponse.json(record, { status: 201 })));
+    } catch (error) {
+      return withCors(req, handleValidationError(req, error)!);
+    }
+  });
+
+  recordRequest('POST /api/v1/attestations', response.status, Date.now() - start);
+  return response;
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const start = Date.now();
+
+  const limited = applyRateLimit(
+    request,
+    'GET /api/v1/attestations',
+    RATE_LIMIT_PRESETS.publicRead,
+  );
+  if (limited) {
+    recordRequest('GET /api/v1/attestations', 429, Date.now() - start);
+    return limited;
+  }
+
+  let query;
+  try {
+    query = parseQuery(request, attestationListQuerySchema);
+  } catch (error) {
+    recordRequest('GET /api/v1/attestations', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
+  }
+
+  const attestations = query.productId
+    ? await listAttestationsForProduct(query.productId)
+    : await listAttestationsByIssuer(query.issuerAddress!);
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 

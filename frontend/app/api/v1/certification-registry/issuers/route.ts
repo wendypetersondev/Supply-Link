@@ -6,12 +6,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { certificationIssuerCreateBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import { kvStore } from '@/lib/kv';
 import type { CertificationIssuer } from '@/lib/types';
 
@@ -30,12 +31,6 @@ async function getIssuerIndex(): Promise<string[]> {
   return raw ? (JSON.parse(raw) as string[]) : [];
 }
 
-const registerSchema = z.object({
-  issuerAddress: z.string().trim().min(1).max(256),
-  name: z.string().trim().min(1).max(256),
-  certTypes: z.array(z.string().trim().min(1).max(64)).min(1).max(50),
-});
-
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
@@ -43,30 +38,40 @@ export function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const start = Date.now();
 
-  const limited = applyRateLimit(request, 'POST /api/v1/certification-registry/issuers', RATE_LIMIT_PRESETS.default);
-  if (limited) { recordRequest('POST /api/v1/certification-registry/issuers', 429, Date.now() - start); return limited; }
+  const limited = applyRateLimit(
+    request,
+    'POST /api/v1/certification-registry/issuers',
+    RATE_LIMIT_PRESETS.default,
+  );
+  if (limited) {
+    recordRequest('POST /api/v1/certification-registry/issuers', 429, Date.now() - start);
+    return limited;
+  }
 
   const auth = await authenticateApiRequest(request, 'partner');
-  if (auth.error) { recordRequest('POST /api/v1/certification-registry/issuers', 401, Date.now() - start); return auth.error; }
-
-  let payload: unknown;
-  try { payload = await request.json(); } catch {
-    return withCors(request, apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'));
+  if (auth.error) {
+    recordRequest('POST /api/v1/certification-registry/issuers', 401, Date.now() - start);
+    return auth.error;
   }
 
-  const parsed = registerSchema.safeParse(payload);
-  if (!parsed.success) {
-    return withCors(request, apiError(request, 400, ErrorCode.VALIDATION_ERROR, parsed.error.issues[0]?.message ?? 'Validation error'));
+  let body;
+  try {
+    body = parseJsonBody(request, await request.text(), certificationIssuerCreateBodySchema);
+  } catch (error) {
+    return withCors(request, handleValidationError(request, error)!);
   }
 
-  const { issuerAddress, name, certTypes } = parsed.data;
+  const { issuerAddress, name, certTypes } = body;
 
   // Check for duplicate active registration
   const existing = await kvStore.get(issuerKey(issuerAddress));
   if (existing) {
     const iss = JSON.parse(existing) as CertificationIssuer;
     if (iss.active) {
-      return withCors(request, apiError(request, 409, ErrorCode.CONFLICT, 'Issuer already registered'));
+      return withCors(
+        request,
+        apiError(request, 409, ErrorCode.CONFLICT, 'Issuer already registered'),
+      );
     }
   }
 
@@ -94,11 +99,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const start = Date.now();
 
-  const limited = applyRateLimit(request, 'GET /api/v1/certification-registry/issuers', RATE_LIMIT_PRESETS.default);
-  if (limited) { recordRequest('GET /api/v1/certification-registry/issuers', 429, Date.now() - start); return limited; }
+  const limited = applyRateLimit(
+    request,
+    'GET /api/v1/certification-registry/issuers',
+    RATE_LIMIT_PRESETS.default,
+  );
+  if (limited) {
+    recordRequest('GET /api/v1/certification-registry/issuers', 429, Date.now() - start);
+    return limited;
+  }
 
   const auth = await authenticateApiRequest(request, 'partner');
-  if (auth.error) { recordRequest('GET /api/v1/certification-registry/issuers', 401, Date.now() - start); return auth.error; }
+  if (auth.error) {
+    recordRequest('GET /api/v1/certification-registry/issuers', 401, Date.now() - start);
+    return auth.error;
+  }
 
   const index = await getIssuerIndex();
   const issuers: CertificationIssuer[] = [];

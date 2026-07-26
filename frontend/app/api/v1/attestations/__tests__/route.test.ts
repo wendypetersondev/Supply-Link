@@ -123,6 +123,15 @@ describe('POST /api/v1/attestations', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'issuerAddress',
+          location: 'body',
+          code: expect.any(String),
+        }),
+      ]),
+    );
   });
 
   it('returns 400 for invalid trustLevel', async () => {
@@ -132,6 +141,11 @@ describe('POST /api/v1/attestations', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: 'trustLevel', location: 'body' })]),
+    );
   });
 
   it('returns 400 for invalid attestationType', async () => {
@@ -141,6 +155,13 @@ describe('POST /api/v1/attestations', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: 'attestationType', location: 'body' }),
+      ]),
+    );
   });
 
   it('returns 400 for invalid reportUrl', async () => {
@@ -150,6 +171,11 @@ describe('POST /api/v1/attestations', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: 'reportUrl', location: 'body' })]),
+    );
   });
 
   it('returns 401 without a valid API key', async () => {
@@ -168,6 +194,11 @@ describe('GET /api/v1/attestations', () => {
     const req = makeRequest('GET', 'http://localhost/api/v1/attestations');
     const res = await GET(req);
     expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: '$', location: 'query' })]),
+    );
   });
 
   it('returns attestations for a productId', async () => {

@@ -11,6 +11,8 @@ import { z } from 'zod';
 import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
 import { apiError, ErrorCode } from '@/lib/api/errors';
 import { getAttestation, revokeAttestation } from '@/lib/attestations';
+import { attestationRevokeBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export const runtime = 'nodejs';
 
@@ -80,12 +82,37 @@ const { DELETE, OPTIONS } = defineRoute(
         );
       }
 
-      return NextResponse.json(
-        { attestationId, revoked: true, revokedAt: Date.now() },
-        { status: 200 },
-      );
-    },
-  },
-);
+  try {
+    const rawBody = await request.text();
+    const { reason } = parseJsonBody(request, rawBody || '{}', attestationRevokeBodySchema);
+    const result = await revokeAttestation(attestationId, callerAddress, reason);
 
-export { GET, DELETE, OPTIONS };
+    if (!result.success) {
+      const status = result.error === 'Attestation not found' ? 404 : 403;
+      const res = withCors(
+        request,
+        apiError(request, status, ErrorCode.UNAUTHORIZED, result.error ?? 'Revocation failed'),
+      );
+      recordRequest('DELETE /api/v1/attestations/[id]', status, Date.now() - start);
+      return res;
+    }
+
+    const response = withCors(
+      request,
+      withCorrelationId(
+        request,
+        NextResponse.json({ attestationId, revoked: true, revokedAt: Date.now() }, { status: 200 }),
+      ),
+    );
+    recordRequest('DELETE /api/v1/attestations/[id]', response.status, Date.now() - start);
+    return response;
+  } catch (error) {
+    const res = withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Request validation failed'),
+    );
+    recordRequest('DELETE /api/v1/attestations/[id]', 400, Date.now() - start);
+    return res;
+  }
+}

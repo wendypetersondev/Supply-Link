@@ -16,6 +16,8 @@ import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
 import { MOCK_BATCHES, getBatchById } from '@/lib/mock/auditors';
 import { MOCK_PRODUCTS } from '@/lib/mock/products';
+import { batchRecallBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -50,63 +52,62 @@ export async function POST(
     return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid batch ID');
   }
 
-  let body: Record<string, unknown>;
   try {
-    body = await request.json();
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
+    const body = parseJsonBody(request, await request.text(), batchRecallBodySchema);
 
-  if (typeof body.reason !== 'string' || !body.reason.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: reason');
-  }
-
-  const batch = getBatchById(batchId);
-  if (!batch) {
-    recordRequest('POST /api/v1/batches/[id]/recall', 404, Date.now() - start);
-    return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Batch not found: ${batchId}`);
-  }
-
-  const reason = body.reason as string;
-  const now = Math.floor(Date.now() / 1000);
-
-  // Mark batch as recalled
-  batch.recalled = true;
-  batch.recallReason = reason;
-  batch.recallTimestamp = now;
-
-  // Propagate recall to all contained products
-  let newlyRecalled = 0;
-  const recalledProductIds: string[] = [];
-
-  for (const productId of batch.productIds) {
-    const product = MOCK_PRODUCTS.find((p) => p.id === productId);
-    if (product && !product.recalled) {
-      product.recalled = true;
-      product.recallReason = reason;
-      product.recallTimestamp = now;
-      newlyRecalled++;
-      recalledProductIds.push(productId);
+    const batch = getBatchById(batchId);
+    if (!batch) {
+      recordRequest('POST /api/v1/batches/[id]/recall', 404, Date.now() - start);
+      return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Batch not found: ${batchId}`);
     }
+
+    const reason = body.reason;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Mark batch as recalled
+    batch.recalled = true;
+    batch.recallReason = reason;
+    batch.recallTimestamp = now;
+
+    // Propagate recall to all contained products
+    let newlyRecalled = 0;
+    const recalledProductIds: string[] = [];
+
+    for (const productId of batch.productIds) {
+      const product = MOCK_PRODUCTS.find((p) => p.id === productId);
+      if (product && !product.recalled) {
+        product.recalled = true;
+        product.recallReason = reason;
+        product.recallTimestamp = now;
+        newlyRecalled++;
+        recalledProductIds.push(productId);
+      }
+    }
+
+    // TODO: Replace with Soroban contract call: recall_batch(batchId, reason)
+
+    const responseBody = {
+      batchId,
+      recalled: true,
+      reason,
+      recallTimestamp: now,
+      newlyRecalledProducts: newlyRecalled,
+      recalledProductIds,
+      totalProducts: batch.productIds.length,
+    };
+
+    recordRequest('POST /api/v1/batches/[id]/recall', 200, Date.now() - start);
+    return withCors(
+      request,
+      withCorrelationId(request, NextResponse.json(responseBody, { status: 200 })),
+    );
+  } catch (error) {
+    const response =
+      handleValidationError(request, error) ??
+      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to recall batch');
+    recordRequest('POST /api/v1/batches/[id]/recall', response.status, Date.now() - start);
+    return response;
   }
-
-  // TODO: Replace with Soroban contract call: recall_batch(batchId, reason)
-
-  const responseBody = {
-    batchId,
-    recalled: true,
-    reason,
-    recallTimestamp: now,
-    newlyRecalledProducts: newlyRecalled,
-    recalledProductIds,
-    totalProducts: batch.productIds.length,
-  };
-
-  recordRequest('POST /api/v1/batches/[id]/recall', 200, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(responseBody, { status: 200 })),
-  );
 }
 
 export async function GET(
@@ -133,7 +134,7 @@ export async function GET(
 
   const { id: batchId } = await params;
 
-  const batch = getBatchById(batchId);
+  const batch = await getAuditorRepository().getBatch(batchId);
   if (!batch) {
     recordRequest('GET /api/v1/batches/[id]/recall', 404, Date.now() - start);
     return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Batch not found: ${batchId}`);

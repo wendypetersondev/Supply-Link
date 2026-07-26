@@ -21,8 +21,10 @@ import {
   getAllBroadcasts,
   getActiveBroadcasts,
 } from '@/lib/services/recallBroadcastService';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
+import { recallBroadcastBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -47,61 +49,31 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(await request.text());
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
-  }
-
-  const body = payload as Record<string, unknown>;
-
-  if (typeof body.productId !== 'string' || !body.productId.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: productId');
-  }
-
-  if (typeof body.reason !== 'string' || !body.reason.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: reason');
-  }
-
-  const severity = body.severity as string;
-  if (!['low', 'medium', 'high', 'critical'].includes(severity)) {
-    return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid severity level');
-  }
-
-  if (!Array.isArray(body.stakeholders) || body.stakeholders.length === 0) {
-    return apiError(
+    const body = parseJsonBody(request, await request.text(), recallBroadcastBodySchema);
+    const product = getProductById(body.productId);
+    if (!product) return apiError(request, 404, ErrorCode.NOT_FOUND, 'Product not found');
+    const initiatedBy = request.headers.get('x-user-id') || 'system';
+    const broadcast = initiateBroadcast(
+      product,
+      body.reason,
+      body.severity,
+      initiatedBy,
+      body.stakeholders,
+      body.affectedBatches,
+    );
+    recordRequest('POST /api/v1/products/recall/broadcast', 201, Date.now() - start);
+    return withCors(
       request,
-      400,
-      ErrorCode.VALIDATION_ERROR,
-      'stakeholders must be a non-empty array',
+      withCorrelationId(request, NextResponse.json(broadcast, { status: 201 })),
+    );
+  } catch (error) {
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
     );
   }
-
-  const product = getProductById(body.productId as string);
-  if (!product) {
-    return apiError(request, 404, ErrorCode.NOT_FOUND, 'Product not found');
-  }
-
-  const affectedBatches = Array.isArray(body.affectedBatches)
-    ? (body.affectedBatches as string[])
-    : [];
-  const initiatedBy = request.headers.get('x-user-id') || 'system';
-
-  const broadcast = initiateBroadcast(
-    product,
-    body.reason as string,
-    severity as 'low' | 'medium' | 'high' | 'critical',
-    initiatedBy,
-    body.stakeholders as string[],
-    affectedBatches,
-  );
-
-  recordRequest('POST /api/v1/products/recall/broadcast', 201, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(broadcast, { status: 201 })),
-  );
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {

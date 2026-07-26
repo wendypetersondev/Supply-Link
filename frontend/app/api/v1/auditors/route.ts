@@ -12,6 +12,8 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { auditorCreateBodySchema, auditorListQuerySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody, parseQuery } from '@/lib/api/validation';
 import { MOCK_AUDITORS } from '@/lib/mock/auditors';
 import type { Auditor, PaginatedResponse } from '@/lib/types';
 
@@ -20,15 +22,9 @@ export function OPTIONS(request: NextRequest) {
 }
 
 async function listAuditors(req: NextRequest): Promise<NextResponse> {
-  const offset = parseInt(req.nextUrl.searchParams.get('offset') ?? '0', 10);
-  const limit = Math.min(parseInt(req.nextUrl.searchParams.get('limit') ?? '50', 10), 100);
-  const activeOnly = req.nextUrl.searchParams.get('active') === 'true';
+  const { offset, limit, active: activeOnly } = parseQuery(req, auditorListQuerySchema);
 
-  if (offset < 0 || limit < 1) {
-    return apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'Invalid offset or limit');
-  }
-
-  const all = activeOnly ? MOCK_AUDITORS.filter((a) => a.active) : MOCK_AUDITORS;
+  const all = await getAuditorRepository().list({ activeOnly });
   const items = all.slice(offset, offset + limit);
 
   const response: PaginatedResponse<Auditor> = {
@@ -42,39 +38,32 @@ async function listAuditors(req: NextRequest): Promise<NextResponse> {
 }
 
 async function registerAuditor(req: NextRequest, rawBody: string): Promise<NextResponse> {
-  let payload: unknown;
   try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return apiError(req, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
+    const body = parseJsonBody(req, rawBody, auditorCreateBodySchema);
+
+    // Check for duplicate
+    const existing = MOCK_AUDITORS.find((a) => a.address === body.address);
+    if (existing) {
+      return apiError(req, 409, ErrorCode.VALIDATION_ERROR, 'Auditor already registered');
+    }
+
+    const newAuditor: Auditor = {
+      address: body.address,
+      name: body.name,
+      active: true,
+      registeredAt: Math.floor(Date.now() / 1000),
+    };
+
+    // TODO: Persist via Soroban contract call: register_auditor(address, name)
+    MOCK_AUDITORS.push(newAuditor);
+
+    return withCors(req, withCorrelationId(req, NextResponse.json(newAuditor, { status: 201 })));
+  } catch (error) {
+    return (
+      handleValidationError(req, error) ??
+      apiError(req, 500, ErrorCode.INTERNAL_ERROR, 'Failed to register auditor')
+    );
   }
-
-  const body = payload as Record<string, unknown>;
-
-  if (typeof body.address !== 'string' || !body.address.trim()) {
-    return apiError(req, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: address');
-  }
-  if (typeof body.name !== 'string' || !body.name.trim()) {
-    return apiError(req, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: name');
-  }
-
-  // Check for duplicate
-  const existing = MOCK_AUDITORS.find((a) => a.address === body.address);
-  if (existing) {
-    return apiError(req, 409, ErrorCode.VALIDATION_ERROR, 'Auditor already registered');
-  }
-
-  const newAuditor: Auditor = {
-    address: body.address as string,
-    name: body.name as string,
-    active: true,
-    registeredAt: Math.floor(Date.now() / 1000),
-  };
-
-  // TODO: Persist via Soroban contract call: register_auditor(address, name)
-  MOCK_AUDITORS.push(newAuditor);
-
-  return withCors(req, withCorrelationId(req, NextResponse.json(newAuditor, { status: 201 })));
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -92,7 +81,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  const response = await listAuditors(request);
+  let response: NextResponse;
+  try {
+    response = await listAuditors(request);
+  } catch (error) {
+    response =
+      handleValidationError(request, error) ??
+      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to list auditors');
+  }
   recordRequest('GET /api/v1/auditors', response.status, Date.now() - start);
   return response;
 }

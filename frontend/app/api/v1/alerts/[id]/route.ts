@@ -7,12 +7,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
+import { alertPatchBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import {
   getAlert,
   acknowledgeAlert,
@@ -23,11 +24,6 @@ import {
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const PatchAlertSchema = z.object({
-  action: z.enum(['acknowledge', 'resolve']),
-  acknowledgedBy: z.string().optional(),
-});
 
 export async function GET(
   request: NextRequest,
@@ -64,10 +60,7 @@ export async function GET(
   }
 
   recordRequest('GET /api/v1/alerts/[id]', 200, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(alert, { status: 200 })),
-  );
+  return withCors(request, withCorrelationId(request, NextResponse.json(alert, { status: 200 })));
 }
 
 export async function PATCH(
@@ -95,28 +88,17 @@ export async function PATCH(
 
   const { id } = await params;
 
-  let body: unknown;
+  let body;
   try {
-    body = await request.json();
-  } catch {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
-    );
-  }
-
-  const parsed = PatchAlertSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('PATCH /api/v1/alerts/[id]', 422, Date.now() - start);
-    return withCors(
-      request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed'),
-    );
+    body = parseJsonBody(request, await request.text(), alertPatchBodySchema);
+  } catch (error) {
+    recordRequest('PATCH /api/v1/alerts/[id]', 400, Date.now() - start);
+    return withCors(request, handleValidationError(request, error)!);
   }
 
   let updated;
-  if (parsed.data.action === 'acknowledge') {
-    updated = acknowledgeAlert(id, parsed.data.acknowledgedBy ?? 'unknown');
+  if (body.action === 'acknowledge') {
+    updated = acknowledgeAlert(id, body.acknowledgedBy ?? 'unknown');
   } else {
     updated = resolveAlert(id);
   }
@@ -125,15 +107,17 @@ export async function PATCH(
     recordRequest('PATCH /api/v1/alerts/[id]', 404, Date.now() - start);
     return withCors(
       request,
-      apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Alert not found or already resolved: ${id}`),
+      apiError(
+        request,
+        404,
+        ErrorCode.VALIDATION_ERROR,
+        `Alert not found or already resolved: ${id}`,
+      ),
     );
   }
 
   recordRequest('PATCH /api/v1/alerts/[id]', 200, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(updated, { status: 200 })),
-  );
+  return withCors(request, withCorrelationId(request, NextResponse.json(updated, { status: 200 })));
 }
 
 export async function DELETE(

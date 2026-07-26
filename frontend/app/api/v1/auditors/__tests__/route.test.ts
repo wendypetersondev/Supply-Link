@@ -27,8 +27,16 @@ vi.mock('@/lib/api/cors', () => ({
 
 vi.mock('@/lib/api/errors', () => ({
   withCorrelationId: (_req: unknown, res: unknown) => res,
-  apiError: (_req: unknown, status: number, _code: unknown, message: string) =>
-    new Response(JSON.stringify({ error: { message } }), { status }),
+  apiError: (
+    _req: unknown,
+    status: number,
+    code: string,
+    message: string,
+    options?: { details?: unknown[] },
+  ) =>
+    new Response(JSON.stringify({ error: { code, message, details: options?.details } }), {
+      status,
+    }),
   ErrorCode: {
     VALIDATION_ERROR: 'VALIDATION_ERROR',
     MISSING_FIELDS: 'MISSING_FIELDS',
@@ -84,14 +92,14 @@ describe('GET /api/v1/auditors', () => {
 describe('POST /api/v1/auditors', () => {
   it('registers a new auditor', async () => {
     const req = makeRequest('POST', 'http://localhost/api/v1/auditors', {
-      address: 'GNEWAUDITOR1234567890ABCDEFGHIJKLMNOPQRST',
+      address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       name: 'New Test Auditor',
     });
     const res = await POST(req);
     expect(res.status).toBe(201);
 
     const body = await res.json();
-    expect(body.address).toBe('GNEWAUDITOR1234567890ABCDEFGHIJKLMNOPQRST');
+    expect(body.address).toBe('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
     expect(body.name).toBe('New Test Auditor');
     expect(body.active).toBe(true);
   });
@@ -102,11 +110,14 @@ describe('POST /api/v1/auditors', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { code: 'VALIDATION_ERROR', details: [expect.objectContaining({ field: 'address' })] },
+    });
   });
 
   it('returns 400 when name is missing', async () => {
     const req = makeRequest('POST', 'http://localhost/api/v1/auditors', {
-      address: 'GSOME1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+      address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     });
     const res = await POST(req);
     expect(res.status).toBe(400);

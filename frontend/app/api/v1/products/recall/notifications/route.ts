@@ -14,6 +14,8 @@ import {
   getBroadcastStats,
 } from '@/lib/services/recallBroadcastService';
 import { recordRequest } from '@/lib/api/metrics';
+import { recallNotificationAcknowledgeBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -86,30 +88,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return auth.error;
   }
 
-  let payload: unknown;
   try {
-    payload = JSON.parse(await request.text());
-  } catch {
-    return apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid JSON');
+    const body = parseJsonBody(
+      request,
+      await request.text(),
+      recallNotificationAcknowledgeBodySchema,
+    );
+    const stakeholder =
+      request.headers.get('x-stakeholder-id') || request.headers.get('x-user-id') || 'default';
+    const notification = acknowledgeNotification(stakeholder, body.broadcastId);
+    if (!notification) return apiError(request, 404, ErrorCode.NOT_FOUND, 'Notification not found');
+    recordRequest(
+      'POST /api/v1/products/recall/notifications/acknowledge',
+      200,
+      Date.now() - start,
+    );
+    return withCors(
+      request,
+      withCorrelationId(request, NextResponse.json(notification, { status: 200 })),
+    );
+  } catch (error) {
+    return withCors(
+      request,
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Invalid request'),
+    );
   }
-
-  const body = payload as Record<string, unknown>;
-
-  if (typeof body.broadcastId !== 'string' || !body.broadcastId.trim()) {
-    return apiError(request, 400, ErrorCode.MISSING_FIELDS, 'Missing or invalid: broadcastId');
-  }
-
-  const stakeholder =
-    request.headers.get('x-stakeholder-id') || request.headers.get('x-user-id') || 'default';
-  const notification = acknowledgeNotification(stakeholder, body.broadcastId as string);
-
-  if (!notification) {
-    return apiError(request, 404, ErrorCode.NOT_FOUND, 'Notification not found');
-  }
-
-  recordRequest('POST /api/v1/products/recall/notifications/acknowledge', 200, Date.now() - start);
-  return withCors(
-    request,
-    withCorrelationId(request, NextResponse.json(notification, { status: 200 })),
-  );
 }

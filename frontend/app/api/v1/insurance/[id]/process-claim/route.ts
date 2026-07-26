@@ -6,21 +6,18 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
 import { getCoverage, processClaimAutomatically } from '@/lib/services/insuranceCoverage';
+import { processClaimBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
 }
-
-const ProcessClaimSchema = z.object({
-  claimId: z.string().min(1),
-});
 
 export async function POST(
   request: NextRequest,
@@ -56,37 +53,24 @@ export async function POST(
     );
   }
 
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
+    const { claimId } = parseJsonBody(request, await request.text(), processClaimBodySchema);
+    const result = processClaimAutomatically(id, claimId);
+    if (!result)
+      return withCors(
+        request,
+        apiError(request, 404, ErrorCode.VALIDATION_ERROR, 'Claim not found'),
+      );
+    recordRequest('POST /api/v1/insurance/[id]/process-claim', 200, Date.now() - start);
     return withCors(
       request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid JSON body'),
+      withCorrelationId(request, NextResponse.json(result, { status: 200 })),
     );
-  }
-
-  const parsed = ProcessClaimSchema.safeParse(body);
-  if (!parsed.success) {
-    recordRequest('POST /api/v1/insurance/[id]/process-claim', 422, Date.now() - start);
+  } catch (error) {
     return withCors(
       request,
-      apiError(request, 422, ErrorCode.VALIDATION_ERROR, 'Validation failed', {
-        details: parsed.error.issues.map((e) => ({
-          field: e.path.join('.'),
-          location: 'body' as const,
-          message: e.message,
-        })),
-      }),
+      handleValidationError(request, error) ??
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid request'),
     );
   }
-
-  const result = processClaimAutomatically(id, parsed.data.claimId);
-  if (!result) {
-    recordRequest('POST /api/v1/insurance/[id]/process-claim', 404, Date.now() - start);
-    return withCors(request, apiError(request, 404, ErrorCode.VALIDATION_ERROR, 'Claim not found'));
-  }
-
-  recordRequest('POST /api/v1/insurance/[id]/process-claim', 200, Date.now() - start);
-  return withCors(request, withCorrelationId(request, NextResponse.json(result, { status: 200 })));
 }

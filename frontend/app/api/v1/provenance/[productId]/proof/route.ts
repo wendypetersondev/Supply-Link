@@ -16,6 +16,8 @@ import {
   verifyProvenanceProof,
   decodeProof,
 } from '@/lib/provenance/proofs';
+import { provenanceProofBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);
@@ -86,62 +88,58 @@ export async function POST(
     return limited;
   }
 
-  let body: { encodedProof?: string };
   try {
-    body = await request.json();
-  } catch {
-    return withCors(request, apiError(request, 400, ErrorCode.INVALID_JSON, 'Invalid JSON'));
-  }
+    const body = parseJsonBody(request, await request.text(), provenanceProofBodySchema);
 
-  if (!body.encodedProof || typeof body.encodedProof !== 'string') {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.MISSING_FIELDS, 'encodedProof is required'),
-    );
-  }
-
-  const proof = decodeProof(body.encodedProof);
-  if (!proof) {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Could not decode proof'),
-    );
-  }
-
-  if (proof.productId !== productId) {
-    return withCors(
-      request,
-      apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Proof productId does not match URL'),
-    );
-  }
-
-  try {
-    const events = await getTrackingEvents(productId);
-    const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
-
-    let onChainRoot = '';
-    try {
-      const { contractClient } = await import('@/lib/stellar/contract');
-      const rootBytes = await contractClient.getProvenanceRoot(productId, '');
-      onChainRoot = Array.from(rootBytes)
-        .map((b) => (b as number).toString(16).padStart(2, '0'))
-        .join('');
-    } catch {
-      // Use proof's root for chain-only verification
-      onChainRoot = proof.provenanceRoot;
+    const proof = decodeProof(body.encodedProof);
+    if (!proof) {
+      return withCors(
+        request,
+        apiError(request, 400, ErrorCode.INVALID_PAYLOAD, 'Could not decode proof'),
+      );
     }
 
-    const result = await verifyProvenanceProof(proof, sorted, onChainRoot);
+    if (proof.productId !== productId) {
+      return withCors(
+        request,
+        apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Proof productId does not match URL'),
+      );
+    }
 
-    const res = NextResponse.json({ result }, { status: 200 });
-    recordRequest('POST /api/v1/provenance/proof', 200, Date.now() - start);
-    return withCors(request, withCorrelationId(request, res));
-  } catch (err) {
-    console.error('[provenance proof POST]', err);
-    recordRequest('POST /api/v1/provenance/proof', 500, Date.now() - start);
+    try {
+      const events = await getTrackingEvents(productId);
+      const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
+
+      let onChainRoot = '';
+      try {
+        const { contractClient } = await import('@/lib/stellar/contract');
+        const rootBytes = await contractClient.getProvenanceRoot(productId, '');
+        onChainRoot = Array.from(rootBytes)
+          .map((b) => (b as number).toString(16).padStart(2, '0'))
+          .join('');
+      } catch {
+        // Use proof's root for chain-only verification
+        onChainRoot = proof.provenanceRoot;
+      }
+
+      const result = await verifyProvenanceProof(proof, sorted, onChainRoot);
+
+      const res = NextResponse.json({ result }, { status: 200 });
+      recordRequest('POST /api/v1/provenance/proof', 200, Date.now() - start);
+      return withCors(request, withCorrelationId(request, res));
+    } catch (err) {
+      console.error('[provenance proof POST]', err);
+      recordRequest('POST /api/v1/provenance/proof', 500, Date.now() - start);
+      return withCors(
+        request,
+        apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to verify proof'),
+      );
+    }
+  } catch (error) {
     return withCors(
       request,
-      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to verify proof'),
+      handleValidationError(request, error) ??
+        apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to verify proof'),
     );
   }
 }

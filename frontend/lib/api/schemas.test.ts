@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONTRACT_LIMITS,
   feeBumpBodySchema,
+  productCreateBodySchema,
   productBadgeParamsSchema,
   ratingsBodySchema,
   ratingsQuerySchema,
+  trackingEventCreateBodySchema,
   uploadFieldsSchema,
 } from '@/lib/api/schemas';
+
+const stellarAddress = `G${'A'.repeat(55)}`;
 
 describe('ratingsBodySchema', () => {
   it('accepts a valid ratings payload', () => {
@@ -72,5 +77,42 @@ describe('productBadgeParamsSchema', () => {
 
   it('rejects a blank path id', () => {
     expect(productBadgeParamsSchema.safeParse({ id: '' }).success).toBe(false);
+  });
+});
+
+describe('contract write schemas', () => {
+  it('accepts product strings at their contract boundaries', () => {
+    expect(
+      productCreateBodySchema.safeParse({
+        name: 'n'.repeat(CONTRACT_LIMITS.productName),
+        origin: 'o'.repeat(CONTRACT_LIMITS.origin),
+        owner: stellarAddress,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects a product name beyond its contract limit', () => {
+    expect(
+      productCreateBodySchema.safeParse({
+        name: 'n'.repeat(CONTRACT_LIMITS.productName + 1),
+        origin: 'origin',
+        owner: stellarAddress,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects malformed Stellar addresses and unsupported event types', () => {
+    expect(
+      productCreateBodySchema.safeParse({ name: 'name', origin: 'origin', owner: 'not-an-address' })
+        .success,
+    ).toBe(false);
+    expect(
+      trackingEventCreateBodySchema.safeParse({
+        eventType: 'UNKNOWN',
+        location: 'farm',
+        actor: stellarAddress,
+        seq: 0,
+      }).success,
+    ).toBe(false);
   });
 });

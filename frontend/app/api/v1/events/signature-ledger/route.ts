@@ -19,7 +19,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
-import { getProductById, getEventsByProductId } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { createHash } from 'crypto';
 
 export const runtime = 'nodejs';
@@ -102,7 +102,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const offset = Math.max(0, parseInt(searchParams.get('offset') ?? '0', 10) || 0);
   const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit') ?? '100', 10) || 100));
 
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     const res = withCors(
       request,
@@ -112,7 +112,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return res;
   }
 
-  const allEvents = getEventsByProductId(productId).sort((a, b) => a.timestamp - b.timestamp);
+  const allEvents = (await getEventRepository().listByProduct(productId)).sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
   const page = allEvents.slice(offset, offset + limit);
 
   // Build the hash chain. For paginated requests we need the anchor of the

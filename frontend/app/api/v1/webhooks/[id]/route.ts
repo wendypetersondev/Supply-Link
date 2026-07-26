@@ -1,19 +1,19 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getWebhookById, updateWebhook, deleteWebhook } from "@/lib/webhooks/storage";
+import { NextRequest, NextResponse } from 'next/server';
+import { getWebhookById, updateWebhook, deleteWebhook } from '@/lib/webhooks/storage';
+import { webhookSubscriptionPatchBodySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
+import { apiError, ErrorCode } from '@/lib/api/errors';
 
 /**
  * GET /api/v1/webhooks/[id] - Get a specific webhook
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const webhook = await getWebhookById(id);
 
     if (!webhook) {
-      return NextResponse.json({ error: "Webhook not found" }, { status: 404 });
+      return NextResponse.json({ error: 'Webhook not found' }, { status: 404 });
     }
 
     // Don't expose secret in GET response
@@ -30,8 +30,8 @@ export async function GET(
 
     return NextResponse.json(response);
   } catch (err) {
-    console.error("Failed to get webhook:", err);
-    return NextResponse.json({ error: "Failed to get webhook" }, { status: 500 });
+    console.error('Failed to get webhook:', err);
+    return NextResponse.json({ error: 'Failed to get webhook' }, { status: 500 });
   }
 }
 
@@ -39,28 +39,23 @@ export async function GET(
  * PATCH /api/v1/webhooks/[id] - Update webhook (e.g., toggle active)
  * Request body: { active?: boolean }
  */
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const body = await request.json();
+    const body = parseJsonBody(request, await request.text(), webhookSubscriptionPatchBodySchema);
 
     const webhook = await getWebhookById(id);
     if (!webhook) {
-      return NextResponse.json({ error: "Webhook not found" }, { status: 404 });
+      return NextResponse.json({ error: 'Webhook not found' }, { status: 404 });
     }
 
     const updates: Record<string, boolean> = {};
-    if (typeof body.active === "boolean") {
-      updates.active = body.active;
-    }
+    if (body.active !== undefined) updates.active = body.active;
 
     const updated = await updateWebhook(id, updates);
 
     if (!updated) {
-      return NextResponse.json({ error: "Failed to update webhook" }, { status: 500 });
+      return NextResponse.json({ error: 'Failed to update webhook' }, { status: 500 });
     }
 
     const response = {
@@ -75,8 +70,10 @@ export async function PATCH(
 
     return NextResponse.json(response);
   } catch (err) {
-    console.error("Failed to update webhook:", err);
-    return NextResponse.json({ error: "Failed to update webhook" }, { status: 500 });
+    const validation = handleValidationError(request, err);
+    if (validation) return validation;
+    console.error('Failed to update webhook:', err);
+    return apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to update webhook');
   }
 }
 
@@ -85,19 +82,19 @@ export async function PATCH(
  */
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
     const deleted = await deleteWebhook(id);
 
     if (!deleted) {
-      return NextResponse.json({ error: "Webhook not found" }, { status: 404 });
+      return NextResponse.json({ error: 'Webhook not found' }, { status: 404 });
     }
 
     return NextResponse.json({ success: true }, { status: 204 });
   } catch (err) {
-    console.error("Failed to delete webhook:", err);
-    return NextResponse.json({ error: "Failed to delete webhook" }, { status: 500 });
+    console.error('Failed to delete webhook:', err);
+    return NextResponse.json({ error: 'Failed to delete webhook' }, { status: 500 });
   }
 }

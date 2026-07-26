@@ -7,91 +7,138 @@
  * Idempotency: POST requests via Idempotency-Key header
  */
 
-import { NextResponse } from 'next/server';
-import { z } from 'zod';
-import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
-import { getAllProducts, MOCK_PRODUCTS } from '@/lib/mock/products';
+import { NextRequest, NextResponse } from 'next/server';
+import { withCors, handleOptions } from '@/lib/api/cors';
+import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
+import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
+import { authenticateApiRequest } from '@/lib/api/auth';
+import { withIdempotency } from '@/lib/api/idempotency';
+import { getProductRepository } from '@/lib/data';
+import { recordRequest } from '@/lib/api/metrics';
+import { productCreateBodySchema, productListQuerySchema } from '@/lib/api/schemas';
+import { handleValidationError, parseJsonBody, parseQuery } from '@/lib/api/validation';
 import type { Product, PaginatedResponse } from '@/lib/types';
 
-// ── Schemas ───────────────────────────────────────────────────────────────────
+export function OPTIONS(request: NextRequest) {
+  return handleOptions(request);
+}
 
-const querySchema = z.object({
-  offset: z.coerce.number().int().min(0).default(0),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
+async function listProducts(req: NextRequest, apiKey: string): Promise<NextResponse> {
+  const { offset, limit } = parseQuery(req, productListQuerySchema);
 
-const bodySchema = z.object({
-  name: z.string().trim().min(1, 'name is required'),
-  origin: z.string().trim().min(1, 'origin is required'),
-  owner: z.string().trim().min(1, 'owner is required'),
-  authorizedActors: z.array(z.string()).optional().default([]),
-  requiredSignatures: z.number().int().min(0).optional().default(1),
-  imageUrl: z.string().optional(),
-});
+  const page = await getProductRepository().list({ offset, limit });
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+  const response: PaginatedResponse<Product> = {
+    items: page.items,
+    total: page.total,
+    offset,
+    limit,
+  };
 
-export const { GET, POST, OPTIONS } = defineRoute(
-  {
-    auth: 'partner',
-    rateLimit: RATE_LIMIT_PRESETS.default,
-    idempotent: true,
-    body: bodySchema,
-    query: querySchema,
-  },
-  {
-    GET: async (ctx) => {
-      const { offset, limit } = ctx.query;
+  return withCors(req, withCorrelationId(req, NextResponse.json(response, { status: 200 })));
+}
 
-      const allProducts = getAllProducts();
-      const items = allProducts.slice(offset, offset + limit);
+async function registerProduct(
+  req: NextRequest,
+  apiKey: string,
+  rawBody: string,
+): Promise<NextResponse> {
+  try {
+    const body = parseJsonBody(req, rawBody, productCreateBodySchema);
 
-      const response: PaginatedResponse<Product> = {
-        items,
-        total: allProducts.length,
-        offset,
-        limit,
-      };
+    // Create new product
+    const newProduct: Product = {
+      id: `prod-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      name: body.name,
+      origin: body.origin,
+      owner: body.owner,
+      timestamp: Date.now(),
+      active: true,
+      authorizedActors: body.authorizedActors,
+      requiredSignatures: body.requiredSignatures,
+      imageUrl: body.imageUrl,
+      ownershipHistory: [
+        {
+          owner: body.owner,
+          transferredAt: Date.now(),
+        },
+      ],
+    };
 
-      return NextResponse.json(response, { status: 200 });
-    },
+    // TODO: Persist to database instead of mock
+    MOCK_PRODUCTS.push(newProduct);
 
-    POST: async (ctx) => {
-      const body = ctx.body;
+    // Notify webhooks of the new product registration
+    try {
+      const { notifyWebhooksOfProductEvent } = await import('@/lib/webhooks/processor');
+      await notifyWebhooksOfProductEvent('product_registered', newProduct.id, {
+        product: newProduct,
+      });
+    } catch (err) {
+      console.error('Failed to notify webhooks of product registration:', err);
+      // Don't fail the request if webhook notification fails
+    }
 
-      const newProduct: Product = {
-        id: `prod-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        name: body.name,
-        origin: body.origin,
-        owner: body.owner,
-        timestamp: Date.now(),
-        active: true,
-        authorizedActors: body.authorizedActors,
-        requiredSignatures: body.requiredSignatures,
-        imageUrl: body.imageUrl,
-        ownershipHistory: [
-          {
-            owner: body.owner,
-            transferredAt: Date.now(),
-          },
-        ],
-      };
+    return withCors(req, withCorrelationId(req, NextResponse.json(newProduct, { status: 201 })));
+  } catch (error) {
+    return (
+      handleValidationError(req, error) ??
+      apiError(req, 500, ErrorCode.INTERNAL_ERROR, 'Failed to register product')
+    );
+  }
+}
 
-      // TODO: Persist to database instead of mock
-      MOCK_PRODUCTS.push(newProduct);
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const start = Date.now();
 
-      // Notify webhooks of the new product registration
-      try {
-        const { notifyWebhooksOfProductEvent } = await import('@/lib/webhooks/processor');
-        await notifyWebhooksOfProductEvent('product_registered', newProduct.id, {
-          product: newProduct,
-        });
-      } catch (err) {
-        console.error('Failed to notify webhooks of product registration:', err);
-        // Don't fail the request if webhook notification fails
-      }
+  // Apply IP-based rate limiting (public endpoint behavior)
+  const limited = applyRateLimit(request, 'GET /api/v1/products', RATE_LIMIT_PRESETS.default);
+  if (limited) {
+    recordRequest('GET /api/v1/products', 429, Date.now() - start);
+    return limited;
+  }
 
-      return NextResponse.json(newProduct, { status: 201 });
-    },
-  },
-);
+  // Authenticate API key
+  const auth = await authenticateApiRequest(request, 'partner');
+  if (auth.error) {
+    recordRequest('GET /api/v1/products', 401, Date.now() - start);
+    return auth.error;
+  }
+
+  let response: NextResponse;
+  try {
+    response = await listProducts(request, auth.apiKey!);
+  } catch (error) {
+    response =
+      handleValidationError(request, error) ??
+      apiError(request, 500, ErrorCode.INTERNAL_ERROR, 'Failed to list products');
+  }
+  recordRequest('GET /api/v1/products', response.status, Date.now() - start);
+  return response;
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const start = Date.now();
+
+  // Apply IP-based rate limiting
+  const limited = applyRateLimit(request, 'POST /api/v1/products', RATE_LIMIT_PRESETS.default);
+  if (limited) {
+    recordRequest('POST /api/v1/products', 429, Date.now() - start);
+    return limited;
+  }
+
+  // Authenticate API key
+  const auth = await authenticateApiRequest(request, 'partner');
+  if (auth.error) {
+    recordRequest('POST /api/v1/products', 401, Date.now() - start);
+    return auth.error;
+  }
+
+  // Handle with idempotency
+  const response = await withIdempotency(request, (req, rawBody) =>
+    registerProduct(req, auth.apiKey!, rawBody),
+  );
+
+  recordRequest('POST /api/v1/products', response.status, Date.now() - start);
+  return response;
+}
