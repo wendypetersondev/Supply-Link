@@ -16,7 +16,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { generateTimelineExport, generateBatchExport } from '@/lib/services/exportService';
-import { getAllProducts, getProductById, MOCK_EVENTS } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
 import { productExportBodySchema } from '@/lib/api/schemas';
 import { handleValidationError, parseJsonBody } from '@/lib/api/validation';

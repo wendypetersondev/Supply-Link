@@ -16,7 +16,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { checkTransferCompliance } from '@/lib/transferCompliance';
 import { transferPreflightBodySchema } from '@/lib/api/schemas';
 import type { TransferPreflightBody } from '@/lib/api/schemas';
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const { productId, newOwner, walletAddress, hasPendingEscrow } = parsed;
 
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     const res = withCors(
       request,

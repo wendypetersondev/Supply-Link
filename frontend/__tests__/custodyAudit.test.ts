@@ -21,34 +21,38 @@ vi.mock('@/lib/api/auth', () => ({
   authenticateApiRequest: async () => ({ error: null }),
 }));
 vi.mock('@/lib/api/metrics', () => ({ recordRequest: vi.fn() }));
-vi.mock('@/lib/mock/products', () => ({
-  getProductById: (id: string) => (id === 'p1' ? { id: 'p1' } : null),
-  getEventsByProductId: () => [
-    {
-      product_id: 'p1',
-      actor: 'GA',
-      event_type: 'HARVEST',
-      timestamp: 1000,
-      location: 'Farm',
-      metadata: '{}',
-    },
-    {
-      product_id: 'p1',
-      actor: 'GB',
-      event_type: 'PROCESSING',
-      timestamp: 2000,
-      location: 'Factory',
-      metadata: '{}',
-    },
-    {
-      product_id: 'p1',
-      actor: 'GC',
-      event_type: 'SHIPPING',
-      timestamp: 3000,
-      location: 'Port',
-      metadata: '{}',
-    },
-  ],
+vi.mock('@/lib/data', () => ({
+  getProductRepository: () => ({
+    getById: async (id: string) => (id === 'p1' ? { id: 'p1' } : null),
+  }),
+  getEventRepository: () => ({
+    listByProduct: async () => [
+      {
+        product_id: 'p1',
+        actor: 'GA',
+        event_type: 'HARVEST',
+        timestamp: 1000,
+        location: 'Farm',
+        metadata: '{}',
+      },
+      {
+        product_id: 'p1',
+        actor: 'GB',
+        event_type: 'PROCESSING',
+        timestamp: 2000,
+        location: 'Factory',
+        metadata: '{}',
+      },
+      {
+        product_id: 'p1',
+        actor: 'GC',
+        event_type: 'SHIPPING',
+        timestamp: 3000,
+        location: 'Port',
+        metadata: '{}',
+      },
+    ],
+  }),
 }));
 
 function sha256(s: string) {

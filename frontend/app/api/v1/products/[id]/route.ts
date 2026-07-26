@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { withCors, handleOptions } from '@/lib/api/cors';
 import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
 import type { Product } from '@/lib/types';
 
@@ -43,7 +43,7 @@ export async function GET(
     return apiError(request, 400, ErrorCode.VALIDATION_ERROR, 'Invalid product ID');
   }
 
-  const product = getProductById(id);
+  const product = await getProductRepository().getById(id);
   if (!product) {
     recordRequest('GET /api/v1/products/[id]', 404, Date.now() - start);
     return withCors(

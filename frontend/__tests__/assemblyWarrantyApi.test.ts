@@ -93,17 +93,34 @@ const mockProducts: Product[] = [
   },
 ];
 
-vi.mock('@/lib/mock/products', () => ({
-  getProductById: (id: string) => mockProducts.find((p) => p.id === id),
-  getAllProducts: () => mockProducts,
-  MOCK_PRODUCTS: mockProducts,
-}));
+vi.mock('@/lib/data', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/data')>();
+  // `products` is a getter: this factory runs before the const above is
+  // initialised, so the array can only be read lazily.
+  const store: import('@/lib/data').MockStore = {
+    ...actual.createMockStore(),
+    get products() {
+      return mockProducts;
+    },
+  };
+  const productRepository = new actual.MockProductRepository(store);
+  return { ...actual, getProductRepository: () => productRepository };
+});
 
 // ── Import route handlers ─────────────────────────────────────────────────────
 
-import { GET as getAssembly, POST as postAssembly } from '@/app/api/v1/products/[id]/assembly/route';
-import { GET as getWarranty, POST as postWarranty } from '@/app/api/v1/products/[id]/warranty/route';
-import { GET as getClaims, POST as postClaim } from '@/app/api/v1/products/[id]/warranty/claims/route';
+import {
+  GET as getAssembly,
+  POST as postAssembly,
+} from '@/app/api/v1/products/[id]/assembly/route';
+import {
+  GET as getWarranty,
+  POST as postWarranty,
+} from '@/app/api/v1/products/[id]/warranty/route';
+import {
+  GET as getClaims,
+  POST as postClaim,
+} from '@/app/api/v1/products/[id]/warranty/claims/route';
 
 function makeRequest(method: string, url: string, body?: object): NextRequest {
   return new NextRequest(url, {
@@ -303,15 +320,11 @@ describe('GET /api/v1/products/[id]/warranty/claims', () => {
 
 describe('POST /api/v1/products/[id]/warranty/claims', () => {
   it('files a claim with valid payload', async () => {
-    const req = makeRequest(
-      'POST',
-      'http://localhost/api/v1/products/prod-001/warranty/claims',
-      {
-        description: 'Product defective on arrival',
-        claimant: 'GCUSTOMER123',
-        proofRef: 'ipfs://QmProof',
-      },
-    );
+    const req = makeRequest('POST', 'http://localhost/api/v1/products/prod-001/warranty/claims', {
+      description: 'Product defective on arrival',
+      claimant: 'GCUSTOMER123',
+      proofRef: 'ipfs://QmProof',
+    });
     const res = await postClaim(req, { params: Promise.resolve({ id: 'prod-001' }) });
     expect(res.status).toBe(201);
     const data = await res.json();
@@ -321,41 +334,35 @@ describe('POST /api/v1/products/[id]/warranty/claims', () => {
   });
 
   it('returns 400 when description is missing', async () => {
-    const req = makeRequest(
-      'POST',
-      'http://localhost/api/v1/products/prod-001/warranty/claims',
-      { claimant: 'GCUSTOMER123' },
-    );
+    const req = makeRequest('POST', 'http://localhost/api/v1/products/prod-001/warranty/claims', {
+      claimant: 'GCUSTOMER123',
+    });
     const res = await postClaim(req, { params: Promise.resolve({ id: 'prod-001' }) });
     expect(res.status).toBe(400);
   });
 
   it('returns 400 when claimant is missing', async () => {
-    const req = makeRequest(
-      'POST',
-      'http://localhost/api/v1/products/prod-001/warranty/claims',
-      { description: 'Broken' },
-    );
+    const req = makeRequest('POST', 'http://localhost/api/v1/products/prod-001/warranty/claims', {
+      description: 'Broken',
+    });
     const res = await postClaim(req, { params: Promise.resolve({ id: 'prod-001' }) });
     expect(res.status).toBe(400);
   });
 
   it('returns 400 when product has no warranty', async () => {
-    const req = makeRequest(
-      'POST',
-      'http://localhost/api/v1/products/prod-002/warranty/claims',
-      { description: 'Broken', claimant: 'GCUSTOMER123' },
-    );
+    const req = makeRequest('POST', 'http://localhost/api/v1/products/prod-002/warranty/claims', {
+      description: 'Broken',
+      claimant: 'GCUSTOMER123',
+    });
     const res = await postClaim(req, { params: Promise.resolve({ id: 'prod-002' }) });
     expect(res.status).toBe(400);
   });
 
   it('returns 404 for unknown product', async () => {
-    const req = makeRequest(
-      'POST',
-      'http://localhost/api/v1/products/unknown/warranty/claims',
-      { description: 'Broken', claimant: 'GCUSTOMER123' },
-    );
+    const req = makeRequest('POST', 'http://localhost/api/v1/products/unknown/warranty/claims', {
+      description: 'Broken',
+      claimant: 'GCUSTOMER123',
+    });
     const res = await postClaim(req, { params: Promise.resolve({ id: 'unknown' }) });
     expect(res.status).toBe(404);
   });

@@ -134,7 +134,7 @@ export async function GET(
 
   const { id: batchId } = await params;
 
-  const batch = getBatchById(batchId);
+  const batch = await getAuditorRepository().getBatch(batchId);
   if (!batch) {
     recordRequest('GET /api/v1/batches/[id]/recall', 404, Date.now() - start);
     return apiError(request, 404, ErrorCode.VALIDATION_ERROR, `Batch not found: ${batchId}`);

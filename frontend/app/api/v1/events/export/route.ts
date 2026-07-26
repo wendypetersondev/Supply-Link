@@ -21,7 +21,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
-import { getProductById, getEventsByProductId } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { buildInterchangePayload } from '@/lib/interchange/eventExporter';
 
 export const runtime = 'nodejs';
@@ -66,7 +66,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit') ?? '100', 10) || 100));
   const format = searchParams.get('format') ?? 'json';
 
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     const res = withCors(
       request,
@@ -77,7 +77,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   // Fetch events sorted oldest-first (canonical provenance order)
-  const allEvents = getEventsByProductId(productId).sort((a, b) => a.timestamp - b.timestamp);
+  const allEvents = (await getEventRepository().listByProduct(productId)).sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
 
   const payload = buildInterchangePayload(product, allEvents, { offset, limit });
 

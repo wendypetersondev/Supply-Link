@@ -26,25 +26,29 @@ vi.mock('@/lib/api/rateLimit', () => ({
 
 vi.mock('@/lib/api/metrics', () => ({ recordRequest: vi.fn() }));
 
-vi.mock('@/lib/mock/products', () => ({
-  getProductById: (id: string) =>
-    id === 'known'
-      ? { id, name: 'Test Product', origin: 'Kenya', owner: 'GTEST', timestamp: 1000000 }
-      : null,
-  getEventsByProductId: (id: string) =>
-    id === 'known'
-      ? [
-          {
-            product_id: id,
-            event_type: 'HARVEST',
-            actor: 'GFARM',
-            timestamp: 1000000,
-            location: 'Farm',
-            metadata: '{}',
-          },
-        ]
-      : [],
-  MOCK_EVENTS: [],
+vi.mock('@/lib/data', () => ({
+  getProductRepository: () => ({
+    getById: async (id: string) =>
+      id === 'known'
+        ? { id, name: 'Test Product', origin: 'Kenya', owner: 'GTEST', timestamp: 1000000 }
+        : null,
+  }),
+  getEventRepository: () => ({
+    listByProduct: async (id: string) =>
+      id === 'known'
+        ? [
+            {
+              product_id: id,
+              event_type: 'HARVEST',
+              actor: 'GFARM',
+              timestamp: 1000000,
+              location: 'Farm',
+              metadata: '{}',
+            },
+          ]
+        : [],
+    listAll: async () => [],
+  }),
 }));
 
 describe('#398 Public audit APIs — no auth required', () => {

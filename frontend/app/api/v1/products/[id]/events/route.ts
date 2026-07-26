@@ -13,7 +13,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { withIdempotency } from '@/lib/api/idempotency';
-import { getProductById, getEventsByProductId, MOCK_EVENTS } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
 import { validateEventMetadata } from '@/lib/api/eventMetadataSchemas';
 import {
@@ -40,14 +40,14 @@ async function listEvents(
   apiKey: string,
 ): Promise<NextResponse> {
   // Verify product exists
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     return apiError(req, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${productId}`);
   }
 
   const { offset, limit } = parseQuery(req, trackingEventListQuerySchema);
 
-  const allEvents = getEventsByProductId(productId);
+  const allEvents = await getEventRepository().listByProduct(productId);
   const items = allEvents.slice(offset, offset + limit);
 
   const response: PaginatedResponse<TrackingEvent> = {
@@ -67,7 +67,7 @@ async function addEvent(
   rawBody: string,
 ): Promise<NextResponse> {
   // Verify product exists
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     return apiError(req, 404, ErrorCode.VALIDATION_ERROR, `Product not found: ${productId}`);
   }

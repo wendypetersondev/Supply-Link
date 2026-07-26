@@ -24,7 +24,7 @@ export function OPTIONS(request: NextRequest) {
 async function listAuditors(req: NextRequest): Promise<NextResponse> {
   const { offset, limit, active: activeOnly } = parseQuery(req, auditorListQuerySchema);
 
-  const all = activeOnly ? MOCK_AUDITORS.filter((a) => a.active) : MOCK_AUDITORS;
+  const all = await getAuditorRepository().list({ activeOnly });
   const items = all.slice(offset, offset + limit);
 
   const response: PaginatedResponse<Auditor> = {

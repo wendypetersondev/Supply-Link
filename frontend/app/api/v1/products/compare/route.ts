@@ -33,8 +33,9 @@ import { handleValidationError, parseJsonBody } from '@/lib/api/validation';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { compareProducts } from '@/lib/services/comparisonService';
-import { getAllProducts, getProductById, MOCK_EVENTS } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
+import type { Product } from '@/lib/types';
 
 export function OPTIONS(request: NextRequest) {
   return handleOptions(request);

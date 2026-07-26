@@ -19,7 +19,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { searchProducts } from '@/lib/services/searchService';
-import { getAllProducts } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
 import { productSearchBodySchema } from '@/lib/api/schemas';
 import { handleValidationError, parseJsonBody } from '@/lib/api/validation';

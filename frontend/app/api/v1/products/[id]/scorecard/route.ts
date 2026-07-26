@@ -14,7 +14,7 @@ import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
 import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
 import { authenticateApiRequest } from '@/lib/api/auth';
 import { recordRequest } from '@/lib/api/metrics';
-import { getProductById, getEventsByProductId } from '@/lib/mock/products';
+import { getEventRepository, getProductRepository } from '@/lib/data';
 import { calculateTraceabilityScore } from '@/lib/compliance/traceabilityScorecard';
 
 export const runtime = 'nodejs';
@@ -47,7 +47,7 @@ export async function GET(
     return auth.error;
   }
 
-  const product = getProductById(productId);
+  const product = await getProductRepository().getById(productId);
   if (!product) {
     const res = withCors(
       request,
@@ -57,7 +57,7 @@ export async function GET(
     return res;
   }
 
-  const events = getEventsByProductId(productId);
+  const events = await getEventRepository().listByProduct(productId);
   const scorecard = calculateTraceabilityScore(productId, events);
 
   const inner = NextResponse.json(scorecard, { status: 200 });

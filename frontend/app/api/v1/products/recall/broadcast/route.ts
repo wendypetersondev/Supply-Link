@@ -21,7 +21,7 @@ import {
   getAllBroadcasts,
   getActiveBroadcasts,
 } from '@/lib/services/recallBroadcastService';
-import { getProductById } from '@/lib/mock/products';
+import { getProductRepository } from '@/lib/data';
 import { recordRequest } from '@/lib/api/metrics';
 import { recallBroadcastBodySchema } from '@/lib/api/schemas';
 import { handleValidationError, parseJsonBody } from '@/lib/api/validation';

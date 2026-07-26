@@ -27,32 +27,36 @@ vi.mock('@/lib/api/metrics', () => ({
   recordRequest: vi.fn(),
 }));
 
-vi.mock('@/lib/mock/products', () => ({
-  getProductById: (id: string) => ({
-    id,
-    name: 'Test Product',
-    origin: 'Test Origin',
-    owner: 'GTEST',
-    timestamp: 1000000,
-  }),
-  getEventsByProductId: (id: string) => [
-    {
-      product_id: id,
-      event_type: 'HARVEST',
-      actor: 'GPRODUCER',
+vi.mock('@/lib/data', () => ({
+  getProductRepository: () => ({
+    getById: async (id: string) => ({
+      id,
+      name: 'Test Product',
+      origin: 'Test Origin',
+      owner: 'GTEST',
       timestamp: 1000000,
-      location: 'Farm A',
-      metadata: '{"temp":"20C"}',
-    },
-    {
-      product_id: id,
-      event_type: 'PROCESSING',
-      actor: 'GPROCESSOR',
-      timestamp: 1000100,
-      location: 'Factory B',
-      metadata: '{"batch":"001"}',
-    },
-  ],
+    }),
+  }),
+  getEventRepository: () => ({
+    listByProduct: async (id: string) => [
+      {
+        product_id: id,
+        event_type: 'HARVEST',
+        actor: 'GPRODUCER',
+        timestamp: 1000000,
+        location: 'Farm A',
+        metadata: '{"temp":"20C"}',
+      },
+      {
+        product_id: id,
+        event_type: 'PROCESSING',
+        actor: 'GPROCESSOR',
+        timestamp: 1000100,
+        location: 'Factory B',
+        metadata: '{"batch":"001"}',
+      },
+    ],
+  }),
 }));
 
 describe('GET /api/v1/events/signature-ledger', () => {

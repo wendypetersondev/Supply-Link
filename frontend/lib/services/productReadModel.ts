@@ -12,7 +12,13 @@
  */
 
 import type { Product, TrackingEvent } from '@/lib/types';
-import { getProductById, getEventsByProductId, getAllProducts } from '@/lib/mock/products';
+import { getProductRepository, MockEventRepository, MockProductRepository } from '@/lib/data';
+
+// Fixture repositories are referenced directly rather than through
+// `getProductRepository()`: this module is already contract-first, so the
+// factory would send the fallback path back to the contract it just failed on.
+const fallbackProducts = new MockProductRepository();
+const fallbackEvents = new MockEventRepository();
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 //
@@ -142,9 +148,8 @@ export async function getProduct(
     return onChain;
   }
 
-  // Graceful fallback — mock data for dev / degraded dependency
-  const mock = getProductById(productId);
-  return mock ?? null;
+  // Graceful fallback — fixture data for dev / degraded dependency
+  return fallbackProducts.getById(productId);
 }
 
 /**
@@ -166,12 +171,12 @@ export async function getTrackingEvents(
     return onChain;
   }
 
-  return getEventsByProductId(productId);
+  return fallbackEvents.listByProduct(productId);
 }
 
 /**
- * List all products. Reads from mock in dev; contract pagination in prod.
+ * List all products through the configured repository.
  */
 export async function listProducts(): Promise<Product[]> {
-  return getAllProducts();
+  return getProductRepository().listAll();
 }
