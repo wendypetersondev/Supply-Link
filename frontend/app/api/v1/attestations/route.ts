@@ -2,18 +2,15 @@
  * POST /api/v1/attestations  — Add an attestation to a product
  * GET  /api/v1/attestations  — List attestations (by productId or issuerAddress)
  *
- * Authentication: auditor tier or higher (x-api-key)
- * Rate limiting: default preset
+ * Authentication: public (GET), auditor tier or higher (POST)
+ * Rate limiting: publicRead (GET), default (POST)
+ * Idempotency: POST requests via Idempotency-Key header
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withCors, handleOptions } from '@/lib/api/cors';
-import { apiError, withCorrelationId, ErrorCode } from '@/lib/api/errors';
-import { applyRateLimit, RATE_LIMIT_PRESETS } from '@/lib/api/rateLimit';
-import { authenticateRegistryKey } from '@/lib/api/apiKeyAuth';
-import { withIdempotency } from '@/lib/api/idempotency';
-import { recordRequest } from '@/lib/api/metrics';
+import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
+import { apiError, ErrorCode } from '@/lib/api/errors';
 import {
   addAttestation,
   listAttestationsForProduct,
@@ -22,7 +19,7 @@ import {
 
 export const runtime = 'nodejs';
 
-// ── Validation ────────────────────────────────────────────────────────────────
+// ── Schemas ───────────────────────────────────────────────────────────────────
 
 const addAttestationSchema = z.object({
   productId: z
@@ -64,100 +61,59 @@ const addAttestationSchema = z.object({
   metadata: z.string().max(4096, 'metadata must be 4096 characters or fewer').optional(),
 });
 
+const querySchema = z.object({
+  productId: z.string().optional(),
+  issuerAddress: z.string().optional(),
+});
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-export function OPTIONS(request: NextRequest) {
-  return handleOptions(request);
-}
+// GET is public — no auth required
+const { GET } = defineRoute(
+  {
+    auth: 'public',
+    rateLimit: RATE_LIMIT_PRESETS.publicRead,
+    query: querySchema,
+  },
+  {
+    GET: async (ctx) => {
+      const { productId, issuerAddress } = ctx.query as {
+        productId?: string;
+        issuerAddress?: string;
+      };
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const start = Date.now();
+      if (!productId && !issuerAddress) {
+        return apiError(
+          ctx.req,
+          400,
+          ErrorCode.VALIDATION_ERROR,
+          'Provide either productId or issuerAddress query parameter',
+        );
+      }
 
-  const limited = applyRateLimit(request, 'POST /api/v1/attestations', RATE_LIMIT_PRESETS.default);
-  if (limited) {
-    recordRequest('POST /api/v1/attestations', 429, Date.now() - start);
-    return limited;
-  }
+      const attestations = productId
+        ? await listAttestationsForProduct(productId)
+        : await listAttestationsByIssuer(issuerAddress!);
 
-  // Auditor tier or higher required
-  const auth = await authenticateRegistryKey(request, 'auditor', 'POST /api/v1/attestations');
-  if (auth.error) {
-    recordRequest('POST /api/v1/attestations', 401, Date.now() - start);
-    return auth.error;
-  }
+      return NextResponse.json({ attestations, total: attestations.length }, { status: 200 });
+    },
+  },
+);
 
-  const response = await withIdempotency(request, async (req, rawBody) => {
-    let payload: unknown;
-    try {
-      payload = JSON.parse(rawBody);
-    } catch {
-      return withCors(req, apiError(req, 400, ErrorCode.INVALID_JSON, 'Invalid JSON body'));
-    }
+// POST requires auditor auth + idempotency
+const { POST, OPTIONS } = defineRoute(
+  {
+    auth: 'auditor',
+    rateLimit: RATE_LIMIT_PRESETS.default,
+    idempotent: true,
+    body: addAttestationSchema,
+  },
+  {
+    POST: async (ctx) => {
+      const record = await addAttestation(ctx.body);
+      return NextResponse.json(record, { status: 201 });
+    },
+  },
+);
 
-    const parsed = addAttestationSchema.safeParse(payload);
-    if (!parsed.success) {
-      const details = parsed.error.issues.map((i) => ({
-        field: i.path.join('.'),
-        location: 'body' as const,
-        message: i.message,
-      }));
-      return withCors(
-        req,
-        apiError(req, 400, ErrorCode.VALIDATION_ERROR, 'Validation failed', { details }),
-      );
-    }
-
-    const record = await addAttestation(parsed.data);
-
-    return withCors(req, withCorrelationId(req, NextResponse.json(record, { status: 201 })));
-  });
-
-  recordRequest('POST /api/v1/attestations', response.status, Date.now() - start);
-  return response;
-}
-
-export async function GET(request: NextRequest): Promise<NextResponse> {
-  const start = Date.now();
-
-  const limited = applyRateLimit(
-    request,
-    'GET /api/v1/attestations',
-    RATE_LIMIT_PRESETS.publicRead,
-  );
-  if (limited) {
-    recordRequest('GET /api/v1/attestations', 429, Date.now() - start);
-    return limited;
-  }
-
-  const productId = request.nextUrl.searchParams.get('productId');
-  const issuerAddress = request.nextUrl.searchParams.get('issuerAddress');
-
-  if (!productId && !issuerAddress) {
-    const res = withCors(
-      request,
-      apiError(
-        request,
-        400,
-        ErrorCode.VALIDATION_ERROR,
-        'Provide either productId or issuerAddress query parameter',
-      ),
-    );
-    recordRequest('GET /api/v1/attestations', 400, Date.now() - start);
-    return res;
-  }
-
-  const attestations = productId
-    ? await listAttestationsForProduct(productId)
-    : await listAttestationsByIssuer(issuerAddress!);
-
-  const response = withCors(
-    request,
-    withCorrelationId(
-      request,
-      NextResponse.json({ attestations, total: attestations.length }, { status: 200 }),
-    ),
-  );
-
-  recordRequest('GET /api/v1/attestations', response.status, Date.now() - start);
-  return response;
-}
+export { GET, POST, OPTIONS };

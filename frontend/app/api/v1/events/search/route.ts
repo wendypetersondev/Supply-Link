@@ -7,27 +7,51 @@
  *   location   – substring match on location
  *   actor      – exact match on actor address
  *   eventType  – exact match on event type
+ *
+ * Authentication: public
+ * Rate limiting: publicRead preset
  */
-import { NextRequest, NextResponse } from 'next/server';
+
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { defineRoute, RATE_LIMIT_PRESETS } from '@/lib/api/handler';
 import { searchEvents } from '@/lib/indexer/eventIndex';
-import { withCors, handleOptions } from '@/lib/api/cors';
 
 export const runtime = 'nodejs';
 
-export function OPTIONS(req: NextRequest) {
-  return handleOptions(req);
-}
+const querySchema = z.object({
+  productId: z.string().optional(),
+  text: z.string().optional(),
+  location: z.string().optional(),
+  actor: z.string().optional(),
+  eventType: z.string().optional(),
+});
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = req.nextUrl;
+export const { GET, OPTIONS } = defineRoute(
+  {
+    auth: 'public',
+    rateLimit: RATE_LIMIT_PRESETS.publicRead,
+    query: querySchema,
+  },
+  {
+    GET: async (ctx) => {
+      const q = ctx.query as {
+        productId?: string;
+        text?: string;
+        location?: string;
+        actor?: string;
+        eventType?: string;
+      };
 
-  const results = await searchEvents({
-    productId: searchParams.get('productId') ?? undefined,
-    text: searchParams.get('text') ?? undefined,
-    location: searchParams.get('location') ?? undefined,
-    actor: searchParams.get('actor') ?? undefined,
-    eventType: searchParams.get('eventType') ?? undefined,
-  });
+      const results = await searchEvents({
+        productId: q.productId,
+        text: q.text,
+        location: q.location,
+        actor: q.actor,
+        eventType: q.eventType,
+      });
 
-  return withCors(req, NextResponse.json({ results, total: results.length }));
-}
+      return NextResponse.json({ results, total: results.length });
+    },
+  },
+);
